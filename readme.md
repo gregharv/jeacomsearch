@@ -51,8 +51,12 @@ The system implements three distinct security levels with progressively broader 
 - **Web Crawler**: Python with Playwright for JavaScript execution
 - **Document Processing**: PyPDF2, pdfplumber for PDF extraction
 - **Database**: SQLite for content storage and metadata
-- **Embeddings**: Sentence transformers or OpenAI embeddings
-- **RAG Framework**: LangChain or custom implementation
+- **Embeddings**: Sentence Transformers for vector generation
+- **RAG Framework**: Custom implementation with security-aware routing
+- **LLM Agents**: 
+  - External Level: Google Gemini Flash 2.5
+  - Internal Level: TBD (under evaluation)
+  - Sensitive Level: Self-hosted Llama model
 - **Security**: Role-based access control with data filtering
 
 ### Database Schema
@@ -92,15 +96,18 @@ All collected data is stored in SQLite database:
 ### 3. Embedding Generation
 Vector embeddings are created for semantic search:
 - **Text Chunking**: Documents are split into manageable segments
-- **Vector Creation**: Embeddings generated using transformer models
+- **Vector Creation**: Embeddings generated using Sentence Transformers models
 - **Index Building**: Efficient vector search index for fast retrieval
 - **Metadata Linking**: Embeddings maintain references to source documents
 
 ### 4. Agentic RAG System
-The intelligent query system provides contextual responses:
+The intelligent query system provides contextual responses with security-aware LLM routing:
 - **Query Processing**: Natural language queries are analyzed and understood
-- **Context Retrieval**: Relevant documents retrieved using semantic search
+- **Context Retrieval**: Relevant documents retrieved using semantic search with Sentence Transformers
 - **Response Generation**: AI agent synthesizes responses using retrieved context
+  - **External Level**: Google Gemini Flash 2.5 for public-facing queries
+  - **Internal Level**: LLM selection under evaluation for employee queries
+  - **Sensitive Level**: Self-hosted Llama model for maximum data security
 - **Source Citation**: Responses include references to source materials
 - **Security Filtering**: Results filtered based on user access level
 
@@ -109,6 +116,8 @@ The intelligent query system provides contextual responses:
 ### Access Control
 - **User Authentication**: Secure login system with role-based permissions
 - **Data Filtering**: Query results filtered by user security clearance
+- **LLM Routing**: Queries routed to appropriate LLM based on security level
+- **Data Isolation**: Sensitive data never leaves internal infrastructure
 - **Audit Logging**: All access attempts and queries are logged
 - **Encryption**: Sensitive data encrypted at rest and in transit
 
@@ -116,6 +125,7 @@ The intelligent query system provides contextual responses:
 - **Automatic Tagging**: Content automatically classified during ingestion
 - **Manual Override**: Administrative controls for security level adjustment
 - **Inheritance Rules**: Documents inherit security levels from their sources
+- **LLM Selection**: Security level determines which LLM processes the query
 - **Regular Review**: Periodic security classification audits
 
 ## Installation and Setup
@@ -137,7 +147,11 @@ The intelligent query system provides contextual responses:
 - **Data Sources**: Configure websites and document directories in sources table
 - **Security Levels**: Assign appropriate security classifications
 - **Crawling Schedule**: Set up periodic refresh cycles
-- **Embedding Models**: Choose appropriate transformer models for your use case
+- **Embedding Models**: Configure Sentence Transformers models for semantic search
+- **LLM Endpoints**: 
+  - Configure Gemini Flash 2.5 API for external level
+  - Set up self-hosted Llama model for sensitive level
+  - Define internal level LLM once selected
 
 ## Use Cases
 
@@ -180,3 +194,5 @@ The intelligent query system provides contextual responses:
 - **API Integration**: External system connectivity
 - **Mobile Interface**: Mobile-optimized query interface
 - **Real-time Updates**: Live data streaming and processing
+- **Internal LLM Selection**: Finalize LLM choice for internal security level
+- **Model Performance Optimization**: Fine-tune Sentence Transformers and Llama models for JEA-specific content
