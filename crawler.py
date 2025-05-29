@@ -138,12 +138,21 @@ class WebCrawler:
         return url_domain == base_domain or url_domain.endswith('.' + base_domain)
     
     def _normalize_url(self, url: str) -> str:
-        """Normalize URL by removing fragments and unnecessary parameters"""
+        """Normalize URL by removing fragments, query parameters, and standardizing case/slashes"""
         parsed = urlparse(url)
-        # Remove fragment
+        
+        # Convert path to lowercase and remove trailing slash
+        path = parsed.path.lower()
+        if path != '/' and path.endswith('/'):
+            path = path[:-1]
+        
+        # Remove fragment and query parameters, normalize case
         normalized = urlunparse((
-            parsed.scheme, parsed.netloc, parsed.path,
-            parsed.params, parsed.query, ''
+            parsed.scheme.lower(),
+            parsed.netloc.lower(), 
+            path,
+            parsed.params, 
+            '', ''  # Remove query and fragment
         ))
         return normalized
     
@@ -152,6 +161,24 @@ class WebCrawler:
         # Remove script and style elements
         for script in soup(["script", "style"]):
             script.decompose()
+        
+        # Remove specific div IDs that should be excluded
+        specific_ids_to_remove = ['top-navigation', 'header-container', 'footer-container']
+        for div_id in specific_ids_to_remove:
+            div_element = soup.find(id=div_id)
+            if div_element:
+                if self.debug:
+                    print(f"  -> Removing div with ID: {div_id}")
+                div_element.decompose()
+        
+        # Remove specific div classes that should be excluded
+        specific_classes_to_remove = ['left-side cf']
+        for div_class in specific_classes_to_remove:
+            div_elements = soup.find_all('div', class_=div_class)
+            for div_element in div_elements:
+                if self.debug:
+                    print(f"  -> Removing div with class: {div_class}")
+                div_element.decompose()
         
         # Remove elements that commonly contain JavaScript disabled messages
         js_disabled_selectors = [
@@ -232,6 +259,31 @@ class WebCrawler:
             
             main_content = soup
         
+        # NOW convert hyperlinks to markdown format (after link extraction is done)
+        for link in main_content.find_all('a', href=True):
+            href = link['href']
+            link_text = link.get_text().strip()
+            
+            # Skip empty links or links without text
+            if not link_text:
+                continue
+            
+            # Skip certain types of links
+            if href.startswith(('mailto:', 'tel:', 'javascript:')):
+                continue
+            
+            # Convert relative URLs to absolute URLs
+            if hasattr(self, '_current_url'):
+                absolute_href = urljoin(self._current_url, href)
+            else:
+                absolute_href = href
+            
+            # Create markdown link
+            markdown_link = f"[{link_text}]({absolute_href})"
+            
+            # Replace the link element with the markdown text
+            link.replace_with(markdown_link)
+        
         # Extract text from the main content
         if main_content:
             text = main_content.get_text()
@@ -282,21 +334,56 @@ class WebCrawler:
     def _extract_links(self, soup: BeautifulSoup, base_url: str, current_url: str) -> List[str]:
         """Extract internal links from HTML"""
         links = []
+        all_links_found = []
+        
+        # Define URL patterns to exclude
+        excluded_patterns = [
+            '/events/',
+            '/event/',
+        ]
         
         for link in soup.find_all('a', href=True):
             href = link['href']
+            all_links_found.append(href)
             
             # Skip mailto, tel, javascript links
             if href.startswith(('mailto:', 'tel:', 'javascript:')):
+                if self.debug:
+                    print(f"    -> Skipping special link: {href}")
                 continue
             
             # Convert relative URLs to absolute
             absolute_url = urljoin(current_url, href)
             normalized_url = self._normalize_url(absolute_url)
             
+            # Check for excluded URL patterns
+            excluded = False
+            for pattern in excluded_patterns:
+                if pattern in normalized_url:
+                    excluded = True
+                    if self.debug:
+                        print(f"    -> Skipping excluded URL pattern '{pattern}': {normalized_url}")
+                    break
+            
+            if excluded:
+                continue
+            
             # Only include links from the same domain
             if self._is_same_domain(normalized_url, base_url):
                 links.append(normalized_url)
+                if self.debug:
+                    print(f"    -> Added internal link: {normalized_url}")
+            else:
+                if self.debug:
+                    print(f"    -> Skipping external link: {normalized_url}")
+        
+        # Debug output
+        if self.debug:
+            print(f"  -> Found {len(all_links_found)} total links, {len(links)} internal links")
+            if len(all_links_found) > 0:
+                print(f"  -> Sample links found: {all_links_found[:5]}")
+        else:
+            print(f"  -> Found {len(all_links_found)} total links, {len(links)} internal links")
         
         return list(set(links))  # Remove duplicates
     
@@ -314,6 +401,9 @@ class WebCrawler:
     def _fetch_url_requests(self, url: str) -> Optional[Dict[str, Any]]:
         """Fetch URL using requests (no JavaScript)"""
         try:
+            # Store current URL for link resolution
+            self._current_url = url
+            
             response = self.session.get(url, timeout=30)
             
             # Get last modified date if available
@@ -347,6 +437,9 @@ class WebCrawler:
         """Fetch URL using Playwright (with JavaScript support)"""
         page = None
         try:
+            # Store current URL for link resolution
+            self._current_url = url
+            
             # Create new page
             page = self.context.new_page()
             
@@ -652,12 +745,14 @@ class WebCrawler:
                 # Get next URL from queue
                 queue_item = self.db.get_next_queue_item(source_id)
                 if not queue_item:
+                    print(f"No more URLs in queue. Total pages crawled: {pages_crawled}")
                     break
                 
                 queue_id, url = queue_item
                 
                 # Check if we've hit the page limit
                 if max_pages and pages_crawled >= max_pages:
+                    print(f"Reached max pages limit ({max_pages})")
                     break
                 
                 print(f"Fetching: {url}")
@@ -672,7 +767,11 @@ class WebCrawler:
                     # Parse HTML
                     soup = BeautifulSoup(response_data['content'], 'html.parser')
                     
-                    # Extract content
+                    # Extract links FIRST (before modifying the soup for content extraction)
+                    base_url = self.db.get_source_base_url(source_id)
+                    links = self._extract_links(soup, base_url, response_data.get('final_url', url))
+                    
+                    # Then extract content (which will modify the soup by converting links to markdown)
                     title = response_data.get('title') or (soup.title.string.strip() if soup.title else None)
                     text_content = self._extract_text_content(soup)
                     content_hash = self._calculate_content_hash(response_data['content'])
@@ -703,11 +802,13 @@ class WebCrawler:
                         }
                     )
                     
-                    # Extract and queue new links
-                    base_url = self.db.get_source_base_url(source_id)
-                    links = self._extract_links(soup, base_url, response_data.get('final_url', url))
+                    # Add links to queue
+                    links_added = 0
                     for link in links:
-                        self.db.add_to_queue(source_id, link)
+                        if self.db.add_to_queue(source_id, link):
+                            links_added += 1
+                    
+                    print(f"  -> Added {links_added} new URLs to queue")
                     
                     self.db.log_event('url_processed', 
                                     f'Successfully processed: {url} (found {len(links)} links, meaningful: {is_meaningful})',

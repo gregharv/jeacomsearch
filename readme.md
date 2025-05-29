@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project implements a comprehensive Retrieval Augmented Generation (RAG) system for JEA (Jacksonville Electric Authority) with multi-level security access. The system crawls websites, processes documents, stores data in SQLite, generates embeddings, and provides intelligent query responses through an agentic framework.
+This project implements a comprehensive Retrieval Augmented Generation (RAG) system for JEA with multi-level security access. The system crawls websites, processes documents, stores data in SQLite, generates embeddings, and provides intelligent query responses through an agentic framework.
 
 ## Architecture
 
@@ -35,7 +35,7 @@ The system implements three distinct security levels with progressively broader 
 - **Access:** Available to authenticated employees
 - **Use Cases:** Internal operations, employee queries, departmental information
 
-#### 🔒 Sensitive Level (Privileged)
+#### 🔒 Sensitive Level (Privileged) - Not planned for implementation
 - **Data Sources:**
   - All External and Internal level data
   - Sensitive documents and reports
@@ -52,12 +52,11 @@ The system implements three distinct security levels with progressively broader 
 - **Document Processing**: PyPDF2, pdfplumber for PDF extraction
 - **Database**: SQLite for content storage and metadata
 - **Embeddings**: Sentence Transformers for vector generation
-- **RAG Framework**: Custom implementation with security-aware routing
 - **LLM Agents**: 
   - External Level: Google Gemini Flash 2.5
   - Internal Level: TBD (under evaluation)
   - Sensitive Level: Self-hosted Llama model
-- **Security**: Role-based access control with data filtering
+- **Security**: Based on connection from local network or external network
 
 ### Database Schema
 
@@ -81,7 +80,7 @@ The system uses SQLite with the following core tables:
 
 ### 1. Data Collection
 The system begins by crawling configured data sources:
-- **Website Crawling**: Systematically crawls JEA website and external sources, respecting robots.txt and implementing polite crawling practices
+- **Website Crawling**: Systematically crawls JEA website and external sources, implementing polite crawling practices
 - **PDF Processing**: Extracts text from PDF documents using specialized libraries
 - **Content Deduplication**: Uses content hashing to detect and handle duplicate content
 - **Metadata Extraction**: Captures titles, URLs, modification dates, and other relevant metadata
@@ -139,9 +138,10 @@ The intelligent query system provides contextual responses with security-aware L
 1. Clone the repository
 2. Install dependencies: `pip install -r requirements.txt`
 3. Configure data sources in the database
-4. Run initial crawl: `python crawler.py`
-5. Generate embeddings: `python embeddings.py`
-6. Start RAG system: `python rag_agent.py`
+4. Run initial crawl: `python cli.py start {website_url} --javascript`
+5. Generate embeddings: `python embeddings.py` (not implemented yet)
+6. Configure Gemini Flash 2.5 API for external level in `config.py` (not implemented yet)
+7. Start RAG system: `python rag_agent.py` (not implemented yet)
 
 ### Configuration
 - **Data Sources**: Configure websites and document directories in sources table

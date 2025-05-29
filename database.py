@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 from typing import Optional, Dict, Any
 import hashlib
+from urllib.parse import urlparse, urlunparse
 
 class CrawlerDatabase:
     def __init__(self, db_path: str = "crawler.db"):
@@ -123,8 +124,22 @@ class CrawlerDatabase:
         conn.commit()
         conn.close()
     
-    def add_to_queue(self, source_id: int, url: str, priority: int = 0):
-        """Add URL to crawl queue"""
+    def add_to_queue(self, source_id: int, url: str, priority: int = 0) -> bool:
+        """Add URL to crawl queue. Returns True if added, False if already exists."""
+        # Normalize the URL before storing
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        if path != '/' and path.endswith('/'):
+            path = path[:-1]
+        
+        normalized_url = urlunparse((
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            path,
+            parsed.params,
+            '', ''  # Remove query and fragment
+        ))
+        
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -132,13 +147,14 @@ class CrawlerDatabase:
             cursor.execute('''
                 INSERT INTO crawl_queue (source_id, url, priority)
                 VALUES (?, ?, ?)
-            ''', (source_id, url, priority))
+            ''', (source_id, normalized_url, priority))
             conn.commit()
+            conn.close()
+            return True
         except sqlite3.IntegrityError:
             # URL already in queue
-            pass
-        
-        conn.close()
+            conn.close()
+            return False
     
     def get_next_queue_item(self, source_id: int) -> Optional[tuple]:
         """Get the next URL to crawl from the queue"""
