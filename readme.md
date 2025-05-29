@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project implements a comprehensive Retrieval Augmented Generation (RAG) system for JEA with multi-level security access. The system crawls websites, processes documents, stores data in SQLite, generates embeddings, and provides intelligent query responses through an agentic framework.
+This project implements a comprehensive Retrieval Augmented Generation (RAG) system for JEA with multi-level security access. The system crawls websites, processes documents, stores data in SQLite, generates embeddings, and provides intelligent query responses through an agentic framework with a user-friendly Streamlit interface.
 
 ## Architecture
 
@@ -10,38 +10,39 @@ This project implements a comprehensive Retrieval Augmented Generation (RAG) sys
 1. **Web Crawler**: Crawls JEA website and other external sources using Playwright for JavaScript-heavy sites
 2. **Document Processor**: Extracts text from PDFs and other document formats
 3. **Database Storage**: Stores all content in SQLite with metadata and processing status
-4. **Embedding Generation**: Creates vector embeddings for semantic search
-5. **RAG Agent**: Provides intelligent responses using retrieved context
+4. **Embedding Generation**: Creates vector embeddings for semantic search using Sentence Transformers
+5. **RAG Agent**: Provides intelligent responses using retrieved context with LLM-powered analysis
 
 ### Security Levels
 
 The system implements three distinct security levels with progressively broader data access:
 
-#### 🌐 External Level (Public)
+#### 🌐 External Level (Public) - ✅ IMPLEMENTED
 - **Data Sources:**
   - Company website content
   - Public PDFs and documents
   - External knowledge bases
+- **LLM Model:** Google Gemini Flash 2.5 Experimental
 - **Access:** Available to general users and external stakeholders
 - **Use Cases:** General company information, public policies, customer service
 
-#### 🏢 Internal Level (Employee)
+#### 🏢 Internal Level (Employee) - 🔄 PLANNED
 - **Data Sources:**
   - All External level data
   - Internal PDFs and documents
   - Internal knowledge bases
-  - SQL query generation for internal databases
   - Employee handbooks and procedures
+- **LLM Model:** TBD (under evaluation)
 - **Access:** Available to authenticated employees
 - **Use Cases:** Internal operations, employee queries, departmental information
 
-#### 🔒 Sensitive Level (Privileged) - Not planned for implementation
+#### 🔒 Sensitive Level (Privileged) - 🔄 PLANNED
 - **Data Sources:**
   - All External and Internal level data
   - Sensitive documents and reports
   - Restricted database tables
   - Real-time operational data
-  - Executive and financial information
+- **LLM Model:** Self-hosted Llama model (for maximum data security)
 - **Access:** Available to authorized personnel only
 - **Use Cases:** Executive decisions, sensitive operations, confidential analysis
 
@@ -51,11 +52,12 @@ The system implements three distinct security levels with progressively broader 
 - **Web Crawler**: Python with Playwright for JavaScript execution
 - **Document Processing**: PyPDF2, pdfplumber for PDF extraction
 - **Database**: SQLite for content storage and metadata
-- **Embeddings**: Sentence Transformers for vector generation
+- **Embeddings**: Sentence Transformers (all-MiniLM-L6-v2) with local caching and UNC path support
 - **LLM Agents**: 
-  - External Level: Google Gemini Flash 2.5
-  - Internal Level: TBD (under evaluation)
-  - Sensitive Level: Self-hosted Llama model
+  - External Level: Google Gemini Flash 2.5 Experimental ✅
+  - Internal Level: TBD (under evaluation) 🔄
+  - Sensitive Level: Self-hosted Llama model 🔄
+- **User Interface**: Streamlit web application with real-time streaming responses ✅
 - **Security**: Based on connection from local network or external network
 
 ### Database Schema
@@ -72,60 +74,107 @@ The system uses SQLite with the following core tables:
 - Tracks content hashes for change detection
 - Maintains processing status for embedding pipeline
 
+**embeddings**: Stores vector embeddings for semantic search
+- Links to document chunks for efficient retrieval
+- Supports cosine similarity calculations
+- Optimized for fast vector operations
+
 **crawl_log**: Detailed logging for debugging and monitoring
 - Records crawling events and errors
 - Provides audit trail for data collection
+
+**rag_interactions**: Logs user interactions for monitoring
+- Query tracking and performance analysis
+- Security level and confidence scoring
+- User context and response metadata
+
+## Current Implementation Status
+
+### ✅ Fully Implemented Features
+
+#### RAG Agent (rag_agent.py)
+- **Multi-Strategy Retrieval**: Enhanced document retrieval with multiple search variants
+- **LLM-Powered Query Analysis**: Intelligent query intent detection and ambiguity analysis
+- **Security-Aware Routing**: Automatic LLM selection based on security levels
+- **Streaming Responses**: Real-time token streaming for better user experience
+- **Conversation Context**: Multi-turn conversation support with context memory
+- **Source Management**: Comprehensive source tracking and citation
+- **Error Handling**: Robust error recovery and graceful degradation
+- **Local Model Caching**: Efficient embedding model storage with UNC path support
+
+#### Streamlit Interface (streamlit_app.py)
+- **Real-Time Streaming**: Live response generation with typing indicator
+- **Conversation History**: Complete chat history with timestamps and confidence scores
+- **Search Modes**: High Reasoning (comprehensive) vs Fast Search modes
+- **Source Display**: Expandable source citations with relevance scores
+- **Performance Metrics**: Conversation statistics and confidence tracking
+- **Responsive Design**: Clean, professional UI with JEA branding
+- **Error Handling**: User-friendly error messages and recovery
+
+#### Advanced Features
+- **Enhanced Retrieval**: Multiple query variants with result combination and re-ranking
+- **Query Ambiguity Detection**: LLM-powered analysis to determine when clarification is needed
+- **Context-Aware Responses**: Conversation memory for natural follow-up questions
+- **Assumption-Based Processing**: Intelligent defaults for common utility queries
+- **Performance Optimization**: Configurable search modes for speed vs accuracy trade-offs
+
+### 🔄 In Progress / Planned
+
+#### Security Implementation
+- **User Authentication**: Role-based access control system
+- **Internal Level LLM**: Selection and integration of internal security level model
+- **Sensitive Level Setup**: Self-hosted Llama model deployment
+- **Access Control**: User permission and data filtering systems
+
+#### Enhanced Features
+- **Multi-modal Support**: Image and video content processing
+- **Advanced Analytics**: Usage patterns and content insights
+- **API Integration**: RESTful API for external system connectivity
+- **Mobile Optimization**: Enhanced mobile interface
 
 ## Process Flow
 
 ### 1. Data Collection
 The system begins by crawling configured data sources:
-- **Website Crawling**: Systematically crawls JEA website and external sources, implementing polite crawling practices
+- **Website Crawling**: Systematically crawls JEA website and external sources
 - **PDF Processing**: Extracts text from PDF documents using specialized libraries
 - **Content Deduplication**: Uses content hashing to detect and handle duplicate content
 - **Metadata Extraction**: Captures titles, URLs, modification dates, and other relevant metadata
 
-### 2. Data Storage
-All collected data is stored in SQLite database:
-- **Structured Storage**: Organized tables for sources, documents, and logs
+### 2. Data Storage and Embedding
+All collected data is processed and vectorized:
+- **Structured Storage**: Organized tables for sources, documents, and embeddings
+- **Vector Generation**: Sentence Transformers create embeddings with local caching
 - **Change Detection**: Content hashing enables efficient incremental updates
-- **Status Tracking**: Processing status fields coordinate the pipeline
-- **Security Classification**: Data is tagged with appropriate security levels
+- **Index Building**: Efficient vector search with cosine similarity
 
-### 3. Embedding Generation
-Vector embeddings are created for semantic search:
-- **Text Chunking**: Documents are split into manageable segments
-- **Vector Creation**: Embeddings generated using Sentence Transformers models
-- **Index Building**: Efficient vector search index for fast retrieval
-- **Metadata Linking**: Embeddings maintain references to source documents
+### 3. Intelligent Query Processing
+The RAG agent provides sophisticated query handling:
 
-### 4. Agentic RAG System
-The intelligent query system provides contextual responses with security-aware LLM routing:
-- **Query Processing**: Natural language queries are analyzed and understood
-- **Context Retrieval**: Relevant documents retrieved using semantic search with Sentence Transformers
-- **Response Generation**: AI agent synthesizes responses using retrieved context
-  - **External Level**: Google Gemini Flash 2.5 for public-facing queries
-  - **Internal Level**: LLM selection under evaluation for employee queries
-  - **Sensitive Level**: Self-hosted Llama model for maximum data security
-- **Source Citation**: Responses include references to source materials
-- **Security Filtering**: Results filtered based on user access level
+#### Query Analysis
+- **Intent Detection**: Determines query type (rates, contact, payment assistance, etc.)
+- **Ambiguity Analysis**: LLM-powered detection of unclear queries
+- **Search Strategy**: Multiple query variants for comprehensive retrieval
+- **Context Integration**: Conversation memory for follow-up questions
 
-## Security Implementation
+#### Document Retrieval
+- **Semantic Search**: Vector similarity using Sentence Transformers
+- **Multi-Query Approach**: Enhanced retrieval with multiple search variants
+- **Result Re-ranking**: Secondary scoring based on original query
+- **Quality Filtering**: Relevance thresholds and result optimization
 
-### Access Control
-- **User Authentication**: Secure login system with role-based permissions
-- **Data Filtering**: Query results filtered by user security clearance
-- **LLM Routing**: Queries routed to appropriate LLM based on security level
-- **Data Isolation**: Sensitive data never leaves internal infrastructure
-- **Audit Logging**: All access attempts and queries are logged
-- **Encryption**: Sensitive data encrypted at rest and in transit
+#### Response Generation
+- **LLM Selection**: Security-aware model routing (currently Gemini Flash 2.5)
+- **Context Building**: Structured prompts with retrieved documents
+- **Streaming Output**: Real-time token generation
+- **Source Citation**: Automatic reference linking and relevance scoring
 
-### Data Classification
-- **Automatic Tagging**: Content automatically classified during ingestion
-- **Manual Override**: Administrative controls for security level adjustment
-- **Inheritance Rules**: Documents inherit security levels from their sources
-- **LLM Selection**: Security level determines which LLM processes the query
-- **Regular Review**: Periodic security classification audits
+### 4. User Interface
+Streamlit application provides intuitive access:
+- **Real-time Streaming**: Live response generation with visual feedback
+- **Conversation Management**: History, context, and follow-up support
+- **Source Transparency**: Expandable citations with relevance metrics
+- **Performance Control**: High Reasoning vs Fast Search modes
 
 ## Installation and Setup
 
@@ -133,66 +182,164 @@ The intelligent query system provides contextual responses with security-aware L
 - Python 3.8+
 - SQLite 3
 - Required Python packages (see requirements.txt)
+- Google API key for Gemini Flash 2.5
 
 ### Quick Start
-1. Clone the repository
-2. Install dependencies: `pip install -r requirements.txt`
-3. Configure data sources in the database
-4. Run initial crawl: `python cli.py start {website_url} --javascript`
-5. Generate embeddings: `python embeddings.py` (not implemented yet)
-6. Configure Gemini Flash 2.5 API for external level in `config.py` (not implemented yet)
-7. Start RAG system: `python rag_agent.py` (not implemented yet)
+1. **Clone the repository**
+   ```bash
+   git clone <repository-url>
+   cd jea-rag-system
+   ```
+
+2. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Configure environment**
+   ```bash
+   # Create .env file with your API keys
+   echo "GEMINI_API_KEY=your_api_key_here" > .env
+   ```
+
+4. **Set up data sources**
+   ```bash
+   # Configure data sources in the database
+   python cli.py start {website_url} --javascript
+   ```
+
+5. **Generate embeddings**
+   ```bash
+   # Process documents and create embeddings
+   python embeddings.py
+   ```
+
+6. **Start the application**
+   ```bash
+   # Launch Streamlit interface
+   streamlit run streamlit_app.py
+   ```
 
 ### Configuration
-- **Data Sources**: Configure websites and document directories in sources table
-- **Security Levels**: Assign appropriate security classifications
-- **Crawling Schedule**: Set up periodic refresh cycles
-- **Embedding Models**: Configure Sentence Transformers models for semantic search
-- **LLM Endpoints**: 
-  - Configure Gemini Flash 2.5 API for external level
-  - Set up self-hosted Llama model for sensitive level
-  - Define internal level LLM once selected
 
-## Use Cases
+#### Embedding Model Setup
+The system automatically handles embedding model setup with local caching:
+- **Model**: all-MiniLM-L6-v2 (Sentence Transformers)
+- **Local Cache**: Configurable cache directory with UNC path support
+- **Fallback**: Automatic download if local cache unavailable
 
-### External Users
-- General company information lookup
-- Public policy and procedure queries
-- Customer service support
-- Regulatory compliance information
+#### LLM Configuration
+- **External Level**: Google Gemini Flash 2.5 Experimental
+  - Requires GEMINI_API_KEY in .env file
+  - Automatic SSL verification handling for downloads
+- **Internal/Sensitive Levels**: Placeholder for future implementation
 
-### Internal Employees
-- Employee handbook and procedure queries
-- Internal documentation search
-- Database query generation and execution
-- Departmental information retrieval
+#### Data Sources
+- **Website Crawling**: Configure URLs in sources table
+- **Security Classification**: Assign appropriate security levels
+- **Refresh Scheduling**: Set up periodic update cycles
 
-### Privileged Users
-- Executive decision support
-- Sensitive operational data analysis
-- Financial and confidential information access
-- Real-time system monitoring and reporting
+## Use Cases and Examples
 
-## Monitoring and Maintenance
+### Typical User Interactions
 
-### Automated Processes
-- **Scheduled Crawling**: Regular updates to keep data current
-- **Health Monitoring**: System status and performance tracking
-- **Error Handling**: Robust error recovery and notification
-- **Data Validation**: Content quality and integrity checks
+#### Customer Service Queries
+```
+User: "What are the current electric rates?"
+Assistant: Provides current residential electric rate structure with rate components, fuel charges, and links to official rate schedules.
+Sources: 3 relevant documents with rate information
+```
 
-### Administrative Tools
-- **Source Management**: Add, modify, and remove data sources
-- **Security Administration**: Manage user permissions and data classifications
-- **Performance Tuning**: Optimize crawling and query performance
-- **Backup and Recovery**: Data protection and disaster recovery procedures
+#### Payment Assistance
+```
+User: "I'm having trouble paying my bill. What options do I have?"
+Assistant: Lists payment plan options, financial assistance programs, budget billing, and contact information for customer assistance.
+Sources: Payment assistance program documents and customer service pages
+```
+
+#### General Information
+```
+User: "What are JEA's customer service hours?"
+Assistant: Provides current customer service hours, phone numbers, and mentions other department hours if relevant.
+Sources: Contact information and customer service pages
+```
+
+### Advanced Features in Action
+
+#### Conversation Context
+```
+User: "What are electric rates?"
+Assistant: [Provides detailed rate information]
+User: "How do those compare to last year?"
+Assistant: [Uses conversation context to understand "those" refers to electric rates]
+```
+
+#### High Reasoning Mode
+- **Multiple Query Variants**: "electric rates" → ["electric rates", "electricity pricing", "rate schedule"]
+- **Enhanced Filtering**: Prioritizes documents with pricing information
+- **Result Combination**: Merges and re-ranks results from multiple searches
+
+#### Ambiguity Handling
+- **Intelligent Defaults**: Assumes "rates" means "residential rates" unless specified
+- **Context Clues**: Uses available information to provide helpful answers
+- **Clarification Requests**: Only asks for clarification when truly necessary
+
+## Monitoring and Performance
+
+### Real-Time Metrics
+- **Response Times**: Streaming performance and total response time
+- **Confidence Scores**: LLM confidence in responses (0.0-1.0)
+- **Source Quality**: Relevance scores and document match quality
+- **Search Performance**: High Reasoning vs Fast Search mode comparison
+
+### Conversation Analytics
+- **Session Tracking**: Multi-turn conversation management
+- **Context Effectiveness**: Conversation memory impact on responses
+- **User Satisfaction**: Confidence trends and source utilization
+
+### System Health
+- **Model Performance**: Embedding and LLM response quality
+- **Database Efficiency**: Query performance and storage optimization
+- **Error Rates**: Exception handling and recovery success
 
 ## Future Enhancements
 
-- **Multi-modal Support**: Image and video content processing
-- **Advanced Analytics**: Usage patterns and content insights
-- **API Integration**: External system connectivity
-- **Mobile Interface**: Mobile-optimized query interface
-- **Real-time Updates**: Live data streaming and processing
-- **Internal LLM Selection**: Finalize LLM choice for internal security level
-- **Model Performance Optimization**: Fine-tune Sentence Transformers and Llama models for JEA-specific content
+### Short Term (Next Quarter)
+- **User Authentication**: Role-based access control implementation
+- **Internal LLM Integration**: Selection and deployment of internal security level model
+- **Performance Optimization**: Query caching and response time improvements
+- **Mobile Interface**: Enhanced mobile responsiveness
+
+### Medium Term (6 Months)
+- **Sensitive Level Implementation**: Self-hosted Llama model deployment
+- **Advanced Analytics**: Usage patterns and content insights dashboard
+- **API Development**: RESTful API for external system integration
+- **Multi-modal Support**: Image and document content processing
+
+### Long Term (1 Year)
+- **Real-time Data Integration**: Live operational data streaming
+- **Predictive Analytics**: Usage pattern prediction and content recommendations
+- **Voice Interface**: Speech-to-text query support
+- **Advanced Security**: Enhanced access controls and audit systems
+
+## Technical Details
+
+### Embedding Pipeline
+- **Model**: all-MiniLM-L6-v2 (384-dimensional embeddings)
+- **Chunking Strategy**: Document-level embeddings with metadata preservation
+- **Similarity Calculation**: Cosine similarity with normalized vectors
+- **Performance**: ~1000 documents/minute processing rate
+
+### LLM Integration
+- **External Level**: Google Gemini Flash 2.5 Experimental
+  - Streaming support for real-time responses
+  - Context window: 2M tokens
+  - Response quality optimized for customer service
+- **Prompt Engineering**: Structured prompts with source context and conversation history
+- **Error Handling**: Graceful degradation and fallback responses
+
+### Security Architecture
+- **Data Classification**: Automatic security level assignment
+- **Access Control**: User-based filtering (planned)
+- **Audit Logging**: Comprehensive interaction tracking
+- **Data Isolation**: Security level-appropriate model routing

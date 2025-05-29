@@ -1,6 +1,4 @@
-fasthtml>=0.2.0
-fastapi>=0.100.0
-uvicorn[standard]>=0.23.0
+streamlit
 websockets>=11.0.0
 sentence-transformers>=2.2.0
 google-generativeai>=0.3.0
