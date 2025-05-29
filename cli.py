@@ -3,6 +3,8 @@ import sys
 from datetime import datetime
 from crawler import WebCrawler
 from database import CrawlerDatabase
+import click
+from rag_agent import RAGAgent, format_response
 
 def main():
     parser = argparse.ArgumentParser(description='Web Crawler for RAG System')
@@ -206,5 +208,89 @@ def main():
         if crawler:
             crawler.close()
 
+@click.command()
+@click.option('--security-level', type=click.Choice(['external', 'internal', 'sensitive']),
+              help='Generate embeddings for specific security level')
+@click.option('--batch-size', default=10, help='Batch size for processing')
+@click.option('--model', default='modernbert-base', help='Model name for embeddings')
+def generate_embeddings(security_level, batch_size, model):
+    """Generate embeddings for documents"""
+    from embeddings import EmbeddingGenerator
+    
+    generator = EmbeddingGenerator(model_name=model)
+    generator.generate_embeddings_batch(security_level=security_level, batch_size=batch_size)
+
+@click.command()
+def embedding_stats():
+    """Show embedding statistics"""
+    from embeddings import EmbeddingGenerator
+    
+    generator = EmbeddingGenerator()
+    stats = generator.get_embedding_stats()
+    
+    click.echo("Embedding Statistics:")
+    click.echo(f"  Status counts: {stats['status_counts']}")
+    click.echo(f"  Total embeddings: {stats['total_embeddings']}")
+    click.echo(f"  Model counts: {stats['model_counts']}")
+
+@click.command()
+@click.argument('query', nargs=-1)
+@click.option('--security-level', type=click.Choice(['external', 'internal', 'sensitive']),
+              help='Security level for the query')
+@click.option('--top-k', default=5, help='Number of sources to retrieve')
+@click.option('--min-similarity', default=0.3, help='Minimum similarity threshold')
+@click.option('--interactive', is_flag=True, help='Start interactive mode')
+def rag_query(query, security_level, top_k, min_similarity, interactive):
+    """Query the RAG agent"""
+    agent = RAGAgent()
+    
+    if interactive:
+        click.echo("JEA RAG Agent - Interactive Mode")
+        click.echo("Type 'quit' to exit\n")
+        
+        while True:
+            query_text = click.prompt("Query", default="", show_default=False)
+            if query_text.lower() in ['quit', 'exit', 'q']:
+                break
+            
+            if not query_text:
+                continue
+            
+            user_context = {}
+            if security_level:
+                user_context['user_type'] = 'employee' if security_level == 'internal' else 'external'
+            
+            response = agent.query(
+                query_text,
+                user_context=user_context,
+                top_k=top_k,
+                min_similarity=min_similarity
+            )
+            
+            click.echo("\n" + format_response(response))
+            click.echo("\n" + "="*80 + "\n")
+    
+    elif query:
+        query_text = " ".join(query)
+        
+        user_context = {}
+        if security_level:
+            user_context['user_type'] = 'employee' if security_level == 'internal' else 'external'
+        
+        response = agent.query(
+            query_text,
+            user_context=user_context,
+            top_k=top_k,
+            min_similarity=min_similarity
+        )
+        
+        click.echo(format_response(response))
+    
+    else:
+        click.echo("Please provide a query or use --interactive mode")
+
 if __name__ == '__main__':
-    main() 
+    main()
+    click.Group(name="embedding")(generate_embeddings)
+    click.Group(name="embedding")(embedding_stats)
+    click.Group(name="rag")(rag_query) 

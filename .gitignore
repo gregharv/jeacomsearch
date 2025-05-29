@@ -1,2 +1,6 @@
 /__pycache__
 crawler.db
+.env
+models/
+.sesskey
+conversation_memory.db
