@@ -22,7 +22,7 @@ The system implements three distinct security levels with progressively broader 
   - Company website content
   - Public PDFs and documents
   - External knowledge bases
-- **LLM Model:** Google Gemini Flash 2.5 Experimental
+- **LLM Model:** Google Gemini Flash 2
 - **Access:** Available to general users and external stakeholders
 - **Use Cases:** General company information, public policies, customer service
 
@@ -54,7 +54,7 @@ The system implements three distinct security levels with progressively broader 
 - **Database**: SQLite for content storage and metadata
 - **Embeddings**: Sentence Transformers (all-MiniLM-L6-v2) with local caching and UNC path support
 - **LLM Agents**: 
-  - External Level: Google Gemini Flash 2.5 Experimental ✅
+  - External Level: Google Gemini Flash 2 ✅
   - Internal Level: TBD (under evaluation) 🔄
   - Sensitive Level: Self-hosted Llama model 🔄
 - **User Interface**: Streamlit web application with real-time streaming responses ✅
@@ -164,7 +164,7 @@ The RAG agent provides sophisticated query handling:
 - **Quality Filtering**: Relevance thresholds and result optimization
 
 #### Response Generation
-- **LLM Selection**: Security-aware model routing (currently Gemini Flash 2.5)
+- **LLM Selection**: Security-aware model routing (currently Gemini Flash 2)
 - **Context Building**: Structured prompts with retrieved documents
 - **Streaming Output**: Real-time token generation
 - **Source Citation**: Automatic reference linking and relevance scoring
@@ -182,39 +182,31 @@ Streamlit application provides intuitive access:
 - Python 3.8+
 - SQLite 3
 - Required Python packages (see requirements.txt)
-- Google API key for Gemini Flash 2.5
+- Google API key for Gemini Flash 2
 
 ### Quick Start
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd jea-rag-system
-   ```
-
-2. **Install dependencies**
+1. **Install dependencies**
    ```bash
    pip install -r requirements.txt
    ```
 
-3. **Configure environment**
+2. **Configure environment**
    ```bash
    # Create .env file with your API keys
    echo "GEMINI_API_KEY=your_api_key_here" > .env
    ```
 
-4. **Set up data sources**
+3. **Crawl the website**
    ```bash
-   # Configure data sources in the database
    python cli.py start {website_url} --javascript
    ```
 
-5. **Generate embeddings**
+4. **Process and chunk text and generate embeddings**
    ```bash
-   # Process documents and create embeddings
    python embeddings.py
    ```
 
-6. **Start the application**
+5. **Start the application**
    ```bash
    # Launch Streamlit interface
    streamlit run streamlit_app.py
@@ -229,7 +221,7 @@ The system automatically handles embedding model setup with local caching:
 - **Fallback**: Automatic download if local cache unavailable
 
 #### LLM Configuration
-- **External Level**: Google Gemini Flash 2.5 Experimental
+- **External Level**: Google Gemini Flash 2
   - Requires GEMINI_API_KEY in .env file
   - Automatic SSL verification handling for downloads
 - **Internal/Sensitive Levels**: Placeholder for future implementation
@@ -331,7 +323,7 @@ Assistant: [Uses conversation context to understand "those" refers to electric r
 - **Performance**: ~1000 documents/minute processing rate
 
 ### LLM Integration
-- **External Level**: Google Gemini Flash 2.5 Experimental
+- **External Level**: Google Gemini Flash 2
   - Streaming support for real-time responses
   - Context window: 2M tokens
   - Response quality optimized for customer service

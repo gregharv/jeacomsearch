@@ -161,7 +161,8 @@ def display_chat_history():
                         st.markdown(f"_{source.chunk_text[:200]}..._")
                         st.markdown("---")
 
-def stream_response_generator(rag_agent, query: str, conversation_context: str, high_reasoning: bool = True) -> Generator[str, None, None]:
+def stream_response_generator(rag_agent, query: str, conversation_context: str, 
+                            high_reasoning: bool = True) -> Generator[str, None, None]:
     """Generator that yields tokens from the RAG agent response"""
     try:
         # Enhance query with conversation context if available
@@ -222,20 +223,6 @@ def main():
     st.markdown('<h1 class="main-header">🔍 JEA Search Assistant</h1>', unsafe_allow_html=True)
     st.markdown("Ask questions about JEA services, rates, policies, and more!")
     
-    # Sidebar configuration
-    st.sidebar.markdown("### ⚙️ Search Settings")
-    
-    high_reasoning = st.sidebar.checkbox(
-        "🧠 High Reasoning Mode",
-        value=True,
-        help="Enable comprehensive search with multiple query variants and enhanced filtering. Unchecking will use faster, simpler search."
-    )
-    
-    if high_reasoning:
-        st.sidebar.success("🔬 Using comprehensive search with multiple strategies")
-    else:
-        st.sidebar.info("⚡ Using fast search with 2 query variants")
-    
     # Load RAG agent
     try:
         rag_agent = load_rag_agent()
@@ -243,28 +230,40 @@ def main():
         st.error(f"Failed to load RAG agent: {e}")
         return
     
+    # Sidebar configuration
+    st.sidebar.markdown("### ⚙️ Search Settings")
+    
+    high_reasoning = st.sidebar.checkbox(
+        "🧠 High Reasoning Mode",
+        value=True,
+        help="Enable comprehensive search with multiple query variants and enhanced filtering."
+    )
+    
+    if high_reasoning:
+        st.sidebar.success("🔬 Using comprehensive search")
+    else:
+        st.sidebar.info("⚡ Using fast search")
+    
     # Main search interface
     st.markdown("### 🔍 Ask JEA Assistant")
     
-    # Use a form to handle Enter key submission
     with st.form(key="search_form", clear_on_submit=False):
-        # Text input
         query = st.text_input(
             "What would you like to know about JEA services?",
             placeholder="e.g., What are the current electric rates?",
             help="Ask questions about JEA services, rates, policies, contact information, and more."
         )
         
-        # Submit button with dynamic text
         search_text = "🔍 Search (High Reasoning)" if high_reasoning else "⚡ Search (Fast)"
         search_button = st.form_submit_button(search_text, type="primary", use_container_width=True)
     
     # Process search with streaming
     if search_button and query:
         search_mode = "comprehensive search" if high_reasoning else "fast search"
+        
         with st.spinner(f"🔍 Connecting to JEA knowledge base ({search_mode})..."):
             try:
-                # FORCE complete reset of RAG agent state
+                # Reset state
                 rag_agent.reset_state()
                 
                 # Build conversation context
@@ -281,15 +280,15 @@ def main():
                     # Update the display in real-time
                     with response_placeholder.container():
                         st.markdown("### 🤖 JEA Assistant Response:")
-                        st.markdown(full_response + "▋")  # Add cursor effect
+                        st.markdown(full_response + "▋")
                 
                 # Final update without cursor
                 with response_placeholder.container():
                     st.markdown("### 🤖 JEA Assistant Response:")
                     st.markdown(full_response)
                 
-                # Get sources after streaming is complete - with delay to ensure they're set
-                time.sleep(0.1)  # Small delay to ensure sources are properly set
+                # Get sources after streaming
+                time.sleep(0.1)
                 sources = rag_agent.get_last_sources()
                 
                 # Add to chat history
@@ -297,7 +296,8 @@ def main():
                 
                 # Show sources
                 if sources:
-                    mode_info = " (High Reasoning)" if high_reasoning else " (Fast Search)"
+                    mode_info = f" (High Reasoning)" if high_reasoning else f" (Fast Search)"
+                    
                     with st.expander(f"📚 View {len(sources)} sources{mode_info}", expanded=False):
                         for j, source in enumerate(sources, 1):
                             st.markdown(f"**{j}. {source.title}** (Relevance: {source.similarity_score:.3f})")

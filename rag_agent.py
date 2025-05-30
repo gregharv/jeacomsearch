@@ -14,6 +14,21 @@ from dotenv import load_dotenv
 import ssl
 import urllib3
 from sklearn.metrics.pairwise import cosine_similarity
+import hashlib
+
+@dataclass
+class CachedQuery:
+    """Represents a cached query with its response"""
+    query_id: int
+    original_query: str
+    query_embedding: np.ndarray
+    response_answer: str
+    response_sources: List[Dict[str, Any]]  # Serialized sources
+    confidence: float
+    security_level: str
+    timestamp: datetime
+    access_count: int
+    similarity_threshold: float = 0.85  # Default threshold for cache hits
 
 @dataclass
 class RetrievedDocument:
@@ -34,6 +49,7 @@ class RAGResponse:
     reasoning: str
     confidence: float
     security_level: str
+    is_cached: bool = False  # New field to indicate if response came from cache
 
 class SecurityLevelRouter:
     """Routes queries to appropriate LLMs based on security level"""
@@ -73,13 +89,262 @@ class SecurityLevelRouter:
         else:
             return self.external_model  # Default fallback
 
+class QueryCache:
+    """Manages caching of queries and responses"""
+    
+    def __init__(self, db_path: str, similarity_threshold: float = 0.85):
+        self.db_path = db_path
+        self.similarity_threshold = similarity_threshold
+        self.logger = logging.getLogger(__name__)
+        self.setup_cache_tables()
+    
+    def setup_cache_tables(self):
+        """Create cache tables if they don't exist"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Create query cache table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS query_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query_hash TEXT UNIQUE NOT NULL,
+                original_query TEXT NOT NULL,
+                query_embedding BLOB NOT NULL,
+                response_answer TEXT NOT NULL,
+                response_sources TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                security_level TEXT NOT NULL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                access_count INTEGER DEFAULT 1,
+                last_accessed DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Create index for faster lookups
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_query_hash ON query_cache(query_hash)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_security_level ON query_cache(security_level)
+        ''')
+        
+        conn.commit()
+        conn.close()
+        self.logger.info("✅ Query cache tables initialized")
+    
+    def _generate_query_hash(self, query: str, security_level: str) -> str:
+        """Generate a hash for the query and security level"""
+        content = f"{query.lower().strip()}:{security_level}"
+        return hashlib.md5(content.encode()).hexdigest()
+    
+    def _serialize_sources(self, sources: List[RetrievedDocument]) -> str:
+        """Serialize sources to JSON string"""
+        serialized = []
+        for source in sources:
+            serialized.append({
+                'document_id': source.document_id,
+                'url': source.url,
+                'title': source.title,
+                'chunk_text': source.chunk_text,
+                'similarity_score': source.similarity_score,
+                'source_type': source.source_type,
+                'chunk_index': source.chunk_index
+            })
+        return json.dumps(serialized)
+    
+    def _deserialize_sources(self, sources_json: str) -> List[RetrievedDocument]:
+        """Deserialize sources from JSON string"""
+        sources_data = json.loads(sources_json)
+        sources = []
+        for data in sources_data:
+            sources.append(RetrievedDocument(**data))
+        return sources
+    
+    def find_similar_cached_query(self, query: str, query_embedding: np.ndarray, 
+                                 security_level: str) -> Optional[CachedQuery]:
+        """Find a similar cached query using embeddings"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            # Get all cached queries for this security level
+            cursor.execute('''
+                SELECT id, original_query, query_embedding, response_answer, 
+                       response_sources, confidence, security_level, timestamp, access_count
+                FROM query_cache 
+                WHERE security_level = ?
+                ORDER BY access_count DESC, last_accessed DESC
+                LIMIT 100
+            ''', (security_level,))
+            
+            cached_queries = cursor.fetchall()
+            
+            if not cached_queries:
+                return None
+            
+            best_match = None
+            best_similarity = 0.0
+            
+            for row in cached_queries:
+                (cache_id, original_query, embedding_blob, response_answer, 
+                 response_sources, confidence, sec_level, timestamp, access_count) = row
+                
+                try:
+                    # Decode cached embedding
+                    cached_embedding = np.frombuffer(embedding_blob, dtype=np.float32)
+                    
+                    # Calculate similarity
+                    similarity = cosine_similarity([query_embedding], [cached_embedding])[0][0]
+                    
+                    if similarity > best_similarity and similarity >= self.similarity_threshold:
+                        best_similarity = similarity
+                        best_match = CachedQuery(
+                            query_id=cache_id,
+                            original_query=original_query,
+                            query_embedding=cached_embedding,
+                            response_answer=response_answer,
+                            response_sources=json.loads(response_sources),
+                            confidence=confidence,
+                            security_level=sec_level,
+                            timestamp=datetime.fromisoformat(timestamp),
+                            access_count=access_count
+                        )
+                
+                except Exception as e:
+                    self.logger.warning(f"Error processing cached query {cache_id}: {e}")
+                    continue
+            
+            if best_match:
+                self.logger.info(f"🎯 Cache hit! Found similar query with {best_similarity:.3f} similarity")
+                self.logger.info(f"   Original: '{query}'")
+                self.logger.info(f"   Cached: '{best_match.original_query}'")
+                
+                # Update access count and last accessed time
+                cursor.execute('''
+                    UPDATE query_cache 
+                    SET access_count = access_count + 1, last_accessed = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (best_match.query_id,))
+                conn.commit()
+                
+                return best_match
+            
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error searching cache: {e}")
+            return None
+        finally:
+            conn.close()
+    
+    def cache_query_response(self, query: str, query_embedding: np.ndarray, 
+                           response: RAGResponse, security_level: str):
+        """Cache a query and its response"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            query_hash = self._generate_query_hash(query, security_level)
+            sources_json = self._serialize_sources(response.sources)
+            
+            # Store in cache (replace if exists)
+            cursor.execute('''
+                INSERT OR REPLACE INTO query_cache 
+                (query_hash, original_query, query_embedding, response_answer, 
+                 response_sources, confidence, security_level)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                query_hash,
+                query,
+                query_embedding.tobytes(),
+                response.answer,
+                sources_json,
+                response.confidence,
+                security_level
+            ))
+            
+            conn.commit()
+            conn.close()
+            
+            self.logger.info(f"💾 Cached query: '{query[:50]}...' (security: {security_level})")
+            
+        except Exception as e:
+            self.logger.error(f"Error caching query: {e}")
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache statistics"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            # Total cached queries
+            cursor.execute('SELECT COUNT(*) FROM query_cache')
+            total_queries = cursor.fetchone()[0]
+            
+            # Most accessed queries
+            cursor.execute('''
+                SELECT original_query, access_count 
+                FROM query_cache 
+                ORDER BY access_count DESC 
+                LIMIT 5
+            ''')
+            top_queries = cursor.fetchall()
+            
+            # Cache by security level
+            cursor.execute('''
+                SELECT security_level, COUNT(*) 
+                FROM query_cache 
+                GROUP BY security_level
+            ''')
+            by_security = dict(cursor.fetchall())
+            
+            return {
+                'total_cached_queries': total_queries,
+                'top_queries': top_queries,
+                'by_security_level': by_security
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error getting cache stats: {e}")
+            return {}
+        finally:
+            conn.close()
+    
+    def clear_old_cache_entries(self, days_old: int = 30):
+        """Clear cache entries older than specified days"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                DELETE FROM query_cache 
+                WHERE timestamp < datetime('now', '-{} days')
+            '''.format(days_old))
+            
+            deleted_count = cursor.rowcount
+            conn.commit()
+            
+            self.logger.info(f"🧹 Cleared {deleted_count} old cache entries (>{days_old} days)")
+            return deleted_count
+            
+        except Exception as e:
+            self.logger.error(f"Error clearing old cache: {e}")
+            return 0
+        finally:
+            conn.close()
+
 class RAGAgent:
-    def __init__(self, db_path: str = "crawler.db", embedding_model: str = "all-MiniLM-L6-v2"):
+    def __init__(self, db_path: str = "crawler.db", embedding_model: str = "all-MiniLM-L6-v2",
+                 cache_similarity_threshold: float = 0.85):
         self.db_path = db_path
         self.embedding_model_name = embedding_model
         self.embedding_model = None
         self.security_router = SecurityLevelRouter()
         self.setup_logging()
+        
+        # Initialize query cache (always enabled)
+        self.query_cache = QueryCache(db_path, cache_similarity_threshold)
         
         # Set up local model cache directory
         self.model_cache_dir = r"\\jeasas2p1\Utility Analytics\Load Research\Projects\jeacomsearch\models\sentence-transformers"
@@ -90,7 +355,6 @@ class RAGAgent:
             self.logger.info("✅ Embedding model loaded successfully")
         except Exception as e:
             self.logger.error(f"Failed to initialize embedding model: {e}")
-            # Don't raise here, let it fail gracefully in encode_query if needed
     
     def setup_logging(self):
         logging.basicConfig(level=logging.INFO)
@@ -724,7 +988,7 @@ Provide a comprehensive answer with proper source citations. Start with the most
 
     def query(self, query: str, user_context: Dict[str, Any] = None, 
               top_k: int = 5, min_similarity: float = 0.3) -> RAGResponse:
-        """Main query interface - orchestrates the full RAG pipeline"""
+        """Main query interface with caching support"""
         
         # Clear previous sources at the start of a new query
         self.last_sources = []
@@ -733,10 +997,41 @@ Provide a comprehensive answer with proper source citations. Start with the most
         # Step 1: Determine security level
         security_level = self.determine_security_level(query, user_context)
         
-        # Step 2: Analyze query intent
+        # Step 2: Check cache first
+        try:
+            # Encode query for cache lookup
+            query_embedding = self.encode_query(query)
+            
+            # Look for similar cached query
+            cached_result = self.query_cache.find_similar_cached_query(
+                query, query_embedding, security_level
+            )
+            
+            if cached_result:
+                # Return cached response
+                sources = self._deserialize_sources(cached_result.response_sources)
+                self.last_sources = sources.copy()
+                
+                self.logger.info(f"✅ Returning cached response for query")
+                
+                return RAGResponse(
+                    answer=cached_result.response_answer,
+                    sources=sources,
+                    reasoning=f"Retrieved from cache (similarity: high, accessed {cached_result.access_count} times)",
+                    confidence=cached_result.confidence,
+                    security_level=security_level,
+                    is_cached=True
+                )
+                
+        except Exception as e:
+            self.logger.warning(f"Cache lookup failed: {e}")
+            # Continue with normal processing if cache fails
+        
+        # Step 3: Normal processing if no cache hit
+        # Analyze query intent
         query_intent = self.analyze_query_intent(query)
         
-        # Step 3: Retrieve relevant documents using enhanced retrieval
+        # Retrieve relevant documents using enhanced retrieval
         retrieved_docs = self.enhanced_retrieve_documents(
             query, 
             security_level=security_level, 
@@ -748,10 +1043,20 @@ Provide a comprehensive answer with proper source citations. Start with the most
         self.last_sources = retrieved_docs.copy()
         self.logger.info(f"✅ Stored {len(self.last_sources)} sources")
         
-        # Step 4: Generate response
+        # Generate response
         response = self.generate_response(query, retrieved_docs, query_intent, security_level)
         
-        # Step 5: Log the interaction
+        # Cache the response if it meets quality threshold
+        if response.confidence >= 0.5:
+            try:
+                query_embedding = self.encode_query(query)
+                self.query_cache.cache_query_response(
+                    query, query_embedding, response, security_level
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to cache response: {e}")
+        
+        # Log the interaction
         self.log_interaction(query, response, user_context)
         
         return response
@@ -785,17 +1090,14 @@ Provide a comprehensive answer with proper source citations. Start with the most
         conn.commit()
         conn.close()
 
-    def stream_query(self, query: str, user_context=None, top_k: int = 5, min_similarity: float = 0.3, high_reasoning: bool = True):
-        """Stream tokens from the query response with enhanced retrieval"""
+    def stream_query(self, query: str, user_context=None, top_k: int = 5, 
+                    min_similarity: float = 0.3, high_reasoning: bool = True):
+        """Stream tokens from the query response with caching support"""
         try:
             # FORCE clear all previous state at the very beginning
             self.last_sources = []
             if hasattr(self, '_cached_results'):
                 delattr(self, '_cached_results')
-            if hasattr(self, '_last_query'):
-                delattr(self, '_last_query')
-            if hasattr(self, '_last_results'):
-                delattr(self, '_last_results')
             
             mode = "high reasoning" if high_reasoning else "standard"
             self.logger.info(f"🔄 STREAM_QUERY: Starting {mode} query: '{query}' - All state cleared")
@@ -803,7 +1105,6 @@ Provide a comprehensive answer with proper source citations. Start with the most
             # Extract the actual question from enhanced query with conversation context
             search_query = query
             if "Current question:" in query:
-                # Extract just the current question for document retrieval
                 parts = query.split("Current question:")
                 if len(parts) > 1:
                     search_query = parts[-1].strip()
@@ -812,32 +1113,62 @@ Provide a comprehensive answer with proper source citations. Start with the most
             # Determine security level
             security_level = self.determine_security_level(search_query, user_context)
             
-            # Use enhanced document retrieval with the extracted question
+            # Step 1: Check cache first
+            try:
+                # Use the extracted search query for cache lookup
+                query_embedding = self.encode_query(search_query)
+                
+                cached_result = self.query_cache.find_similar_cached_query(
+                    search_query, query_embedding, security_level
+                )
+                
+                if cached_result:
+                    # Stream cached response
+                    sources = self._deserialize_sources(cached_result.response_sources)
+                    self.last_sources = sources.copy()
+                    
+                    self.logger.info(f"✅ Streaming cached response")
+                    
+                    # Stream the cached answer
+                    cached_answer = cached_result.response_answer
+                    words = cached_answer.split()
+                    
+                    for i, word in enumerate(words):
+                        yield f" {word}" if i > 0 else word
+                        
+                        # Small delay for streaming effect
+                        import time
+                        time.sleep(0.05)
+                    
+                    return
+                    
+            except Exception as e:
+                self.logger.warning(f"Cache lookup failed in streaming: {e}")
+                # Continue with normal processing
+            
+            # Step 2: Normal processing if no cache hit
             self.logger.info(f"🔍 Starting {'enhanced' if high_reasoning else 'fast'} document retrieval...")
             retrieved_docs = self.enhanced_retrieve_documents(search_query, security_level, top_k, min_similarity, high_reasoning)
             
             # Log what we actually retrieved
             self.logger.info(f"📄 Retrieved {len(retrieved_docs)} documents:")
-            for i, doc in enumerate(retrieved_docs[:3]):  # Log first 3 sources
+            for i, doc in enumerate(retrieved_docs[:3]):
                 self.logger.info(f"  {i+1}. {doc.title} (score: {doc.similarity_score:.3f})")
             
             if not retrieved_docs:
                 yield "I couldn't find relevant information in the JEA knowledge base to answer your question. "
                 yield "You might want to try rephrasing your question or contact JEA customer service directly at (904) 665-6000."
-                # Explicitly set empty sources for this case
                 self.last_sources = []
                 self.logger.info("❌ No documents found - sources explicitly set to empty")
                 return
             
-            # Store sources immediately after retrieval - use deep copy to avoid reference issues
+            # Store sources immediately after retrieval
             import copy
             self.last_sources = copy.deepcopy(retrieved_docs)
             self.logger.info(f"✅ Stored {len(self.last_sources)} sources for display (deep copy)")
             
-            # Build context from retrieved documents
+            # Build context and stream response
             context = self.build_context_from_docs(retrieved_docs)
-            
-            # Get the appropriate model
             model = self.security_router.get_model(security_level)
             
             if model is None:
@@ -845,16 +1176,40 @@ Provide a comprehensive answer with proper source citations. Start with the most
                 yield "Please try again later or contact JEA customer service at (904) 665-6000."
                 return
             
-            # Build the prompt using the ORIGINAL query (with conversation context) for the LLM
+            # Build the prompt and stream
             prompt = self.build_rag_prompt(query, context, user_context)
             
-            # Stream from the model
+            # Collect full response for caching
+            full_response = ""
+            
             try:
                 response = model.generate_content(prompt, stream=True)
                 
                 for chunk in response:
                     if chunk.text:
+                        full_response += chunk.text
                         yield chunk.text
+                
+                # Cache the response after streaming
+                if len(full_response.strip()) > 10:
+                    try:
+                        # Create a response object for caching
+                        response_obj = RAGResponse(
+                            answer=full_response,
+                            sources=retrieved_docs,
+                            reasoning="Generated via streaming",
+                            confidence=0.8,  # Default confidence for streamed responses
+                            security_level=security_level
+                        )
+                        
+                        query_embedding = self.encode_query(search_query)
+                        self.query_cache.cache_query_response(
+                            search_query, query_embedding, response_obj, security_level
+                        )
+                        self.logger.info("✅ Cached streamed response")
+                        
+                    except Exception as e:
+                        self.logger.warning(f"Failed to cache streamed response: {e}")
                         
             except Exception as e:
                 self.logger.error(f"Error during streaming: {e}")
@@ -863,19 +1218,29 @@ Provide a comprehensive answer with proper source citations. Start with the most
         except Exception as e:
             self.logger.error(f"Error in stream_query: {e}")
             yield f"Error processing query: {str(e)}"
-            # Clear sources on error
             self.last_sources = []
 
-    def get_last_sources(self):
-        """Get sources from the last query with detailed logging"""
-        sources = getattr(self, 'last_sources', [])
-        self.logger.info(f"📚 GET_LAST_SOURCES: Returning {len(sources)} sources")
-        if sources:
-            for i, source in enumerate(sources[:3]):
-                self.logger.info(f"  Source {i+1}: {source.title} (ID: {source.document_id})")
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get query cache statistics"""
+        stats = self.query_cache.get_cache_stats()
+        stats["similarity_threshold"] = self.query_cache.similarity_threshold
+        return stats
+    
+    def clear_cache(self, days_old: int = None):
+        """Clear query cache"""
+        if days_old:
+            return self.query_cache.clear_old_cache_entries(days_old)
         else:
-            self.logger.info("  No sources available")
-        return sources
+            # Clear all cache
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM query_cache')
+            deleted_count = cursor.rowcount
+            conn.commit()
+            conn.close()
+            
+            self.logger.info(f"🧹 Cleared all {deleted_count} cache entries")
+            return deleted_count
 
     def build_context_from_docs(self, retrieved_docs: List[RetrievedDocument]) -> str:
         """Build context string from retrieved documents"""
