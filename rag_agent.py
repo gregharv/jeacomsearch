@@ -33,7 +33,7 @@ class CachedQuery:
     original_query: str
     query_embedding: np.ndarray
     response_answer: str
-    response_sources: List[Dict[str, Any]]  # Serialized sources
+    response_sources: str  # JSON string (not parsed list)
     confidence: float
     security_level: str
     timestamp: datetime
@@ -314,47 +314,25 @@ class QueryCache:
     def find_similar_cached_query(self, query: str, query_embedding: np.ndarray, 
                                  security_level: str) -> Optional[CachedQuery]:
         """Find a similar cached query using embeddings"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
+        # Always create a new connection in the current thread to avoid threading issues
         try:
-            # Get all cached queries for this security level with timeout handling
-            def db_query_with_timeout():
-                cursor.execute('''
-                    SELECT id, original_query, query_embedding, response_answer, 
-                           response_sources, confidence, security_level, timestamp, access_count
-                    FROM query_cache 
-                    WHERE security_level = ?
-                    ORDER BY access_count DESC, last_accessed DESC
-                    LIMIT 100
-                ''', (security_level,))
-                return cursor.fetchall()
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
             
-            # Use threading for timeout on all platforms
-            result_container = [None]
-            exception_container = [None]
+            # Use a simple timeout approach for the database query
+            cursor.execute('''
+                SELECT id, original_query, query_embedding, response_answer, 
+                       response_sources, confidence, security_level, timestamp, access_count
+                FROM query_cache 
+                WHERE security_level = ?
+                ORDER BY access_count DESC, last_accessed DESC
+                LIMIT 100
+            ''', (security_level,))
             
-            def db_thread():
-                try:
-                    result_container[0] = db_query_with_timeout()
-                except Exception as e:
-                    exception_container[0] = e
-            
-            thread = threading.Thread(target=db_thread)
-            thread.daemon = True
-            thread.start()
-            thread.join(timeout=3.0)  # 3 second timeout for DB query
-            
-            if thread.is_alive():
-                self.logger.warning("Database query timed out")
-                return None
-            
-            if exception_container[0]:
-                raise exception_container[0]
-            
-            cached_queries = result_container[0] or []
+            cached_queries = cursor.fetchall()
             
             if not cached_queries:
+                conn.close()
                 return None
             
             best_match = None
@@ -378,7 +356,7 @@ class QueryCache:
                             original_query=original_query,
                             query_embedding=cached_embedding,
                             response_answer=response_answer,
-                            response_sources=json.loads(response_sources),
+                            response_sources=response_sources,  # Keep as JSON string, don't parse here
                             confidence=confidence,
                             security_level=sec_level,
                             timestamp=datetime.fromisoformat(timestamp),
@@ -401,16 +379,18 @@ class QueryCache:
                     WHERE id = ?
                 ''', (best_match.query_id,))
                 conn.commit()
-                
-                return best_match
             
-            return None
+            conn.close()
+            return best_match
             
         except Exception as e:
             self.logger.error(f"Error searching cache: {e}")
+            if 'conn' in locals():
+                try:
+                    conn.close()
+                except:
+                    pass
             return None
-        finally:
-            conn.close()
     
     def cache_query_response(self, query: str, query_embedding: np.ndarray, 
                            response: RAGResponse, security_level: str):
@@ -512,8 +492,16 @@ class NetworkError(Exception):
     """Custom exception for network-related errors"""
     pass
 
+def get_db_path():
+    """Get database path with environment variable support"""
+    db_path = os.getenv('CRAWLER_DB_PATH')
+    if db_path:
+        return os.path.abspath(db_path)
+    else:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "crawler.db")
+
 class RAGAgent:
-    def __init__(self, db_path: str = r"\\jeasas2p1\Utility Analytics\Load Research\Projects\jeacomsearch\crawler.db", 
+    def __init__(self, db_path: str = None, 
                  embedding_model: str = "all-MiniLM-L6-v2",
                  cache_similarity_threshold: float = 0.85,
                  preferred_model: str = "gemini"):
@@ -521,12 +509,12 @@ class RAGAgent:
         Initialize RAG Agent
         
         Args:
-            db_path: Path to the SQLite database
+            db_path: Path to the SQLite database (if None, uses get_db_path())
             embedding_model: Name of the sentence transformer model
             cache_similarity_threshold: Threshold for cache hit similarity
             preferred_model: "gemini" for Gemini Flash 2.0, "openai" for GPT-4o-mini
         """
-        self.db_path = db_path
+        self.db_path = db_path if db_path else get_db_path()
         self.embedding_model_name = embedding_model
         self.embedding_model = None
         self.preferred_model = preferred_model
@@ -534,7 +522,7 @@ class RAGAgent:
         self.setup_logging()
         
         # Initialize query cache (always enabled)
-        self.query_cache = QueryCache(db_path, cache_similarity_threshold)
+        self.query_cache = QueryCache(self.db_path, cache_similarity_threshold)
         
         # Set up local model cache directory
         self.model_cache_dir = r"\\jeasas2p1\Utility Analytics\Load Research\Projects\jeacomsearch\models\sentence-transformers"
@@ -1154,46 +1142,20 @@ Be extremely conservative about requesting clarification for standard utility in
             # Determine security level
             security_level = self.determine_security_level(search_query, user_context)
             
-            # Step 1: Check cache first with timeout (cross-platform)
+            # Step 1: Check cache first (simplified without threading timeout)
             try:
-                def cache_lookup_with_timeout():
-                    """Perform cache lookup in a separate thread"""
-                    try:
-                        query_embedding = self.encode_query(search_query)
-                        return self.query_cache.find_similar_cached_query(
-                            search_query, query_embedding, security_level
-                        )
-                    except Exception as e:
-                        self.logger.warning(f"Cache lookup error: {e}")
-                        return None
-                
-                # Use threading for timeout on all platforms
-                result_container = [None]
-                exception_container = [None]
-                
-                def cache_thread():
-                    try:
-                        result_container[0] = cache_lookup_with_timeout()
-                    except Exception as e:
-                        exception_container[0] = e
-                
-                thread = threading.Thread(target=cache_thread)
-                thread.daemon = True
-                thread.start()
-                thread.join(timeout=5.0)  # 5 second timeout
-                
-                if thread.is_alive():
-                    self.logger.warning("Cache lookup timed out")
-                    cached_result = None
-                elif exception_container[0]:
-                    raise exception_container[0]
-                else:
-                    cached_result = result_container[0]
+                query_embedding = self.encode_query(search_query)
+                cached_result = self.query_cache.find_similar_cached_query(
+                    search_query, query_embedding, security_level
+                )
                 
                 if cached_result:
                     # Stream cached response
-                    sources = self._deserialize_sources(cached_result.response_sources)
+                    sources = self.query_cache._deserialize_sources(cached_result.response_sources)
                     self.last_sources = sources.copy()
+                    
+                    # Store cached confidence
+                    self.last_confidence = cached_result.confidence
                     
                     self.logger.info(f"✅ Streaming cached response")
                     
@@ -1308,12 +1270,18 @@ Be extremely conservative about requesting clarification for standard utility in
                 # Cache the response after streaming
                 if len(full_response.strip()) > 10:
                     try:
+                        # Calculate proper confidence based on sources and response quality
+                        calculated_confidence = self.calculate_confidence(search_query, retrieved_docs, full_response)
+                        
+                        # Store the confidence for later retrieval
+                        self.last_confidence = calculated_confidence
+                        
                         # Create a response object for caching
                         response_obj = RAGResponse(
                             answer=full_response,
                             sources=retrieved_docs,
                             reasoning="Generated via streaming",
-                            confidence=0.8,  # Default confidence for streamed responses
+                            confidence=calculated_confidence,  # Use calculated confidence instead of hardcoded 0.8
                             security_level=security_level
                         )
                         
@@ -1482,9 +1450,14 @@ I apologize for the inconvenience!"""
         """Get the sources from the last query"""
         return getattr(self, 'last_sources', [])
     
+    def get_last_confidence(self) -> float:
+        """Get the confidence from the last query"""
+        return getattr(self, 'last_confidence', 0.8)
+    
     def reset_state(self):
         """Reset the agent's state"""
         self.last_sources = []
+        self.last_confidence = 0.8
         if hasattr(self, '_cached_results'):
             delattr(self, '_cached_results')
         self.logger.info("🔄 Agent state reset")

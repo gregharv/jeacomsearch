@@ -75,6 +75,7 @@ def clear_cache(db_path="crawler.db", days_old=None, security_level=None, confir
             '''.format(days_old)
             params = (security_level,)
             description = f"entries older than {days_old} days with security level '{security_level}'"
+            clear_feedback = False
         elif days_old is not None:
             query = '''
                 DELETE FROM query_cache 
@@ -82,29 +83,46 @@ def clear_cache(db_path="crawler.db", days_old=None, security_level=None, confir
             '''.format(days_old)
             params = ()
             description = f"entries older than {days_old} days"
+            clear_feedback = False
         elif security_level is not None:
             query = 'DELETE FROM query_cache WHERE security_level = ?'
             params = (security_level,)
             description = f"entries with security level '{security_level}'"
+            clear_feedback = False
         else:
             query = 'DELETE FROM query_cache'
             params = ()
-            description = "ALL cache entries"
+            description = "ALL cache entries and user feedback"
+            clear_feedback = True
         
         # Get count of entries that would be deleted
         count_query = query.replace('DELETE', 'SELECT COUNT(*)')
         cursor.execute(count_query, params)
         count_to_delete = cursor.fetchone()[0]
         
-        if count_to_delete == 0:
-            print(f"No cache entries found matching criteria: {description}")
+        # Also count user_feedback entries if we're doing a clear-all
+        feedback_count = 0
+        if clear_feedback:
+            cursor.execute('SELECT COUNT(*) FROM user_feedback')
+            feedback_count = cursor.fetchone()[0]
+        
+        total_count = count_to_delete + feedback_count
+        
+        if total_count == 0:
+            print(f"No entries found matching criteria: {description}")
             conn.close()
             return 0
         
-        print(f"Found {count_to_delete} cache {description}")
+        if clear_feedback and feedback_count > 0:
+            print(f"Found {count_to_delete} cache entries and {feedback_count} user feedback entries")
+        else:
+            print(f"Found {count_to_delete} cache {description}")
         
         if confirm:
-            response = input(f"Are you sure you want to delete {count_to_delete} {description}? (y/N): ")
+            if clear_feedback:
+                response = input(f"Are you sure you want to delete {count_to_delete} cache entries and {feedback_count} user feedback entries? (y/N): ")
+            else:
+                response = input(f"Are you sure you want to delete {count_to_delete} {description}? (y/N): ")
             if response.lower() not in ['y', 'yes']:
                 print("Operation cancelled.")
                 conn.close()
@@ -113,10 +131,20 @@ def clear_cache(db_path="crawler.db", days_old=None, security_level=None, confir
         # Execute deletion
         cursor.execute(query, params)
         deleted_count = cursor.rowcount
+        
+        # Also clear user_feedback if doing clear-all
+        if clear_feedback:
+            cursor.execute('DELETE FROM user_feedback')
+            feedback_deleted = cursor.rowcount
+            deleted_count += feedback_deleted
+        
         conn.commit()
         conn.close()
         
-        print(f"✅ Successfully deleted {deleted_count} cache entries")
+        if clear_feedback:
+            print(f"✅ Successfully deleted {count_to_delete} cache entries and {feedback_count} user feedback entries")
+        else:
+            print(f"✅ Successfully deleted {deleted_count} cache entries")
         return deleted_count
         
     except Exception as e:
