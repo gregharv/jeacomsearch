@@ -146,7 +146,7 @@ class SecurityLevelRouter:
         elif security_level == "sensitive":
             return self.sensitive_model
         else:
-            return self.external_model  # Default fallback
+            return self.sensitive_model  # Default fallback
     
     def generate_content(self, prompt: str, stream: bool = False):
         """
