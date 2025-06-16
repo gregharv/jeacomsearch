@@ -412,25 +412,6 @@ CREATE TABLE query_cache (
 );
 ```
 
-### Migration from Single Database
-
-If upgrading from an older single-database version:
-
-```bash
-# 1. Backup existing data
-cp crawler.db crawler_backup.db
-
-# 2. Reset and rebuild with new architecture
-python cli.py reset --confirm
-python init_databases.py
-
-# 3. Re-crawl content
-python cli.py start https://jea.com --max-pages 10
-
-# 4. Re-generate embeddings
-python cli.py generate-embeddings
-```
-
 ## 💻 Development
 
 ### Project Structure
@@ -442,13 +423,13 @@ jeasearch/
 ├── .env                     # Environment variables (create this)
 ├── init_databases.py        # Database initialization
 │
-├── app.py                   # FastHTML web application (1856 lines)
-├── rag_agent.py            # RAG agent with AI models (1232 lines)
-├── crawler.py              # Web crawler with JS support (909 lines)
-├── cli.py                  # Command line interface (358 lines)
-├── database.py             # Knowledge database operations (363 lines)
-├── embeddings.py           # Embedding generation (537 lines)
-├── clear_cache.py          # Cache management utilities (398 lines)
+├── app.py                   # FastHTML web application
+├── rag_agent.py            # RAG agent with AI models
+├── crawler.py              # Web crawler with JS support
+├── cli.py                  # Command line interface
+├── database.py             # Knowledge database operations
+├── embeddings.py           # Embedding generation
+├── clear_cache.py          # Cache management utilities
 │
 ├── knowledge.db            # Knowledge base (created by system)
 ├── app.db                  # Application data (created by system)
@@ -545,22 +526,6 @@ echo $GEMINI_API_KEY
 echo $OPENAI_API_KEY
 ```
 
-#### SSL Certificate Issues
-```
-Error: SSL certificate verification failed
-```
-**Solutions**:
-```bash
-# Option 1: Disable SSL verification (development only)
-python cli.py start https://jea.com --disable-ssl-verify
-
-# Option 2: Use environment variable
-export DISABLE_SSL_VERIFICATION=true
-
-# Option 3: Use custom certificate bundle
-export SSL_CERT_FILE="/path/to/certificate.crt"
-```
-
 #### No Documents Found
 ```
 Warning: No relevant documents found for query
@@ -620,13 +585,6 @@ export HTTPS_PROXY=http://proxy.company.com:8080
 export HTTP_PROXY=http://username:password@proxy.company.com:8080
 ```
 
-#### SSL Monitor
-If experiencing persistent SSL issues, use the built-in SSL monitor:
-```bash
-python ssl_monitor.py
-# Generates detailed SSL connectivity reports
-```
-
 ### Debug Mode
 
 Enable debug logging:
@@ -681,22 +639,6 @@ export LOG_LEVEL=DEBUG
 - External model for public questions
 - Internal model placeholder for corporate queries
 - Sensitive model placeholder for confidential data
-
-### SSL/TLS
-- Full SSL verification by default
-- Custom certificate bundle support
-- Corporate network compatibility
-
-## 📄 License & Support
-
-**Built with ❤️ for JEA Customer Service**
-
-For technical issues:
-1. Check the troubleshooting section above
-2. Review application logs and health status
-3. Use the built-in debugging and monitoring tools
-
-For JEA service questions, contact JEA customer service directly.
 
 ---
 
