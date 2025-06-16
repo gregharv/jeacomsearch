@@ -1,6 +1,30 @@
-/__pycache__
-crawler.db
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
 .env
-models/
-.sesskey
+
+# Databases
+*.db
 conversation_memory.db
+
+# Generated files
+ssl_monitor.py
+ssl_monitor_dashboard_*.html
+ssl_monitor.log
+.sesskey
+
+# AI models (downloaded locally)
+models/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

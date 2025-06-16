@@ -6,8 +6,19 @@ import hashlib
 from urllib.parse import urlparse, urlunparse
 
 class CrawlerDatabase:
-    def __init__(self, db_path: str = "crawler.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str = None):
+        """
+        Initialize CrawlerDatabase with knowledge database path
+        
+        Args:
+            db_path: Path to knowledge database. If None, uses get_knowledge_db_path()
+        """
+        if db_path is None:
+            # Import here to avoid circular imports
+            from rag_agent import get_knowledge_db_path
+            self.db_path = get_knowledge_db_path()
+        else:
+            self.db_path = db_path
         self.init_database()
     
     def init_database(self):
@@ -44,6 +55,9 @@ class CrawlerDatabase:
                 http_status_code INTEGER,
                 metadata_json TEXT,
                 processing_status TEXT DEFAULT 'pending_embedding',
+                embedding_status TEXT DEFAULT 'pending',
+                embedding_model TEXT,
+                embedding_date DATETIME,
                 FOREIGN KEY (source_id) REFERENCES sources (id)
             )
         ''')
@@ -76,8 +90,46 @@ class CrawlerDatabase:
             )
         ''')
         
+        # Create embeddings table (separate from documents for better organization)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS embeddings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                chunk_text TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_model TEXT NOT NULL,
+                created_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+                chunk_hash TEXT NOT NULL,
+                FOREIGN KEY (document_id) REFERENCES documents (id),
+                UNIQUE(document_id, chunk_index, embedding_model)
+            )
+        ''')
+        
+        # Create indexes for better performance
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_embeddings_document 
+            ON embeddings (document_id)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_embeddings_model 
+            ON embeddings (embedding_model)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_documents_url 
+            ON documents (url)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_documents_status 
+            ON documents (embedding_status)
+        ''')
+        
         conn.commit()
         conn.close()
+        print(f"✅ Knowledge database initialized: {self.db_path}")
     
     def add_source(self, source_type: str, base_url: str = None, file_path: str = None, 
                    metadata: Dict[str, Any] = None) -> int:

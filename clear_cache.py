@@ -3,6 +3,7 @@
 JEA RAG Agent Cache Management Script
 
 This script allows you to manage the query cache for the JEA RAG system.
+Note: Cache data is stored in the application database, separate from the knowledge database.
 """
 
 import sqlite3
@@ -11,11 +12,29 @@ import sys
 import os
 from datetime import datetime
 
-def get_cache_stats(db_path="crawler.db"):
-    """Get cache statistics"""
+def get_app_db_path():
+    """Get application database path"""
     try:
-        conn = sqlite3.connect(db_path)
+        from rag_agent import get_app_db_path
+        return get_app_db_path()
+    except ImportError:
+        # Fallback for standalone usage
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.db")
+
+def get_cache_stats(app_db_path=None):
+    """Get cache statistics"""
+    if app_db_path is None:
+        app_db_path = get_app_db_path()
+    
+    try:
+        conn = sqlite3.connect(app_db_path)
         cursor = conn.cursor()
+        
+        # Check if tables exist
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='query_cache'")
+        if not cursor.fetchone():
+            print(f"⚠️  No query_cache table found in {app_db_path}")
+            return None
         
         # Total cached queries
         cursor.execute('SELECT COUNT(*) FROM query_cache')
@@ -60,11 +79,20 @@ def get_cache_stats(db_path="crawler.db"):
         print(f"Error getting cache stats: {e}")
         return None
 
-def clear_cache(db_path="crawler.db", days_old=None, security_level=None, confirm=True):
+def clear_cache(app_db_path=None, days_old=None, security_level=None, confirm=True):
     """Clear cache entries"""
+    if app_db_path is None:
+        app_db_path = get_app_db_path()
+    
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(app_db_path)
         cursor = conn.cursor()
+        
+        # Check if tables exist
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='query_cache'")
+        if not cursor.fetchone():
+            print(f"⚠️  No query_cache table found in {app_db_path}")
+            return 0
         
         # Build query based on parameters
         if days_old is not None and security_level is not None:
@@ -103,8 +131,10 @@ def clear_cache(db_path="crawler.db", days_old=None, security_level=None, confir
         # Also count user_feedback entries if we're doing a clear-all
         feedback_count = 0
         if clear_feedback:
-            cursor.execute('SELECT COUNT(*) FROM user_feedback')
-            feedback_count = cursor.fetchone()[0]
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_feedback'")
+            if cursor.fetchone():
+                cursor.execute('SELECT COUNT(*) FROM user_feedback')
+                feedback_count = cursor.fetchone()[0]
         
         total_count = count_to_delete + feedback_count
         
@@ -133,7 +163,7 @@ def clear_cache(db_path="crawler.db", days_old=None, security_level=None, confir
         deleted_count = cursor.rowcount
         
         # Also clear user_feedback if doing clear-all
-        if clear_feedback:
+        if clear_feedback and feedback_count > 0:
             cursor.execute('DELETE FROM user_feedback')
             feedback_deleted = cursor.rowcount
             deleted_count += feedback_deleted
@@ -151,11 +181,20 @@ def clear_cache(db_path="crawler.db", days_old=None, security_level=None, confir
         print(f"Error clearing cache: {e}")
         return 0
 
-def list_cache_entries(db_path="crawler.db", security_level=None, limit=10):
+def list_cache_entries(app_db_path=None, security_level=None, limit=10):
     """List cache entries"""
+    if app_db_path is None:
+        app_db_path = get_app_db_path()
+    
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(app_db_path)
         cursor = conn.cursor()
+        
+        # Check if table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='query_cache'")
+        if not cursor.fetchone():
+            print(f"⚠️  No query_cache table found in {app_db_path}")
+            return
         
         if security_level:
             cursor.execute('''
@@ -190,11 +229,20 @@ def list_cache_entries(db_path="crawler.db", security_level=None, limit=10):
     except Exception as e:
         print(f"Error listing cache entries: {e}")
 
-def get_cache_analysis(db_path="crawler.db"):
+def get_cache_analysis(app_db_path=None):
     """Get detailed cache analysis for prompt analysis"""
+    if app_db_path is None:
+        app_db_path = get_app_db_path()
+    
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(app_db_path)
         cursor = conn.cursor()
+        
+        # Check if table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='query_cache'")
+        if not cursor.fetchone():
+            print(f"⚠️  No query_cache table found in {app_db_path}")
+            return None
         
         # Basic stats
         cursor.execute('SELECT COUNT(*) FROM query_cache')
@@ -282,12 +330,12 @@ Examples:
   python clear_cache.py --list                     # List recent cache entries
   python clear_cache.py --clear-all                # Clear all cache entries
   python clear_cache.py --clear-old 30             # Clear entries older than 30 days
-  python clear_cache.py --clear-security external  # Clear external security level entries
   python clear_cache.py --clear-old 7 --security external  # Clear external entries older than 7 days
+  python clear_cache.py --app-db-path /path/to/app.db --stats  # Use custom database path
         """
     )
     
-    parser.add_argument("--db-path", default="crawler.db", help="Path to database file")
+    parser.add_argument("--app-db-path", help="Path to application database file (optional)")
     parser.add_argument("--stats", action="store_true", help="Show cache statistics")
     parser.add_argument("--list", action="store_true", help="List cache entries")
     parser.add_argument("--limit", type=int, default=10, help="Limit for list operation")
@@ -299,9 +347,13 @@ Examples:
     
     args = parser.parse_args()
     
+    # Get app database path
+    app_db_path = args.app_db_path if args.app_db_path else get_app_db_path()
+    
     # Check if database exists
-    if not os.path.exists(args.db_path):
-        print(f"Error: Database file '{args.db_path}' not found.")
+    if not os.path.exists(app_db_path):
+        print(f"Error: Application database file '{app_db_path}' not found.")
+        print("Tip: Run the web application first to create the database, or use --app-db-path to specify location.")
         sys.exit(1)
     
     # Show stats
@@ -309,7 +361,7 @@ Examples:
         print("📊 Cache Statistics")
         print("=" * 50)
         
-        stats = get_cache_stats(args.db_path)
+        stats = get_cache_stats(app_db_path)
         if stats:
             print(f"Total cached queries: {stats['total_queries']}")
             print(f"By security level: {stats['by_security_level']}")
@@ -330,14 +382,14 @@ Examples:
     elif args.list:
         print("📋 Cache Entries")
         print("=" * 50)
-        list_cache_entries(args.db_path, args.security, args.limit)
+        list_cache_entries(app_db_path, args.security, args.limit)
     
     # Clear operations
     elif args.clear_all:
-        clear_cache(args.db_path, confirm=not args.force)
+        clear_cache(app_db_path, confirm=not args.force)
     
     elif args.clear_old is not None:
-        clear_cache(args.db_path, days_old=args.clear_old, security_level=args.security, confirm=not args.force)
+        clear_cache(app_db_path, days_old=args.clear_old, security_level=args.security, confirm=not args.force)
     
     else:
         parser.print_help()

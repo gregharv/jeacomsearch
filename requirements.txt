@@ -1,6 +1,26 @@
-streamlit
-websockets>=11.0.0
+# Core Framework
+fasthtml>=0.2.0
+uvicorn>=0.24.0
+
+# AI and ML
 sentence-transformers>=2.2.0
 google-generativeai>=0.3.0
+openai>=1.0.0
+scikit-learn>=1.3.0
+numpy>=1.24.0
+
+# Environment and Config
 python-dotenv>=1.0.0
-numpy>=1.21.0 
+
+# Web Crawling (optional - for advanced crawling with JavaScript)
+playwright>=1.40.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+
+# SSL Monitoring (optional - for SSL debugging)
+plotly>=5.17.0
+pandas>=2.1.0
+
+# Development tools (optional - for interactive sessions)
+click>=8.1.0
+tqdm>=4.66.0 

@@ -4,7 +4,7 @@ from datetime import datetime
 from crawler import WebCrawler
 from database import CrawlerDatabase
 import click
-from rag_agent import RAGAgent, format_response
+from rag_agent import RAGAgent, format_response, get_knowledge_db_path, get_app_db_path
 
 def main():
     parser = argparse.ArgumentParser(description='Web Crawler for RAG System')
@@ -19,6 +19,8 @@ def main():
                             help='Enable JavaScript execution (slower but more complete)')
     start_parser.add_argument('--debug', action='store_true', 
                             help='Enable debug output')
+    start_parser.add_argument('--disable-ssl-verify', action='store_true',
+                            help='Disable SSL certificate verification (use only for trusted sites with cert issues)')
     
     # Resume crawl command
     resume_parser = subparsers.add_parser('resume', help='Resume crawling a source')
@@ -26,6 +28,8 @@ def main():
     resume_parser.add_argument('--max-pages', type=int, help='Maximum additional pages to crawl')
     resume_parser.add_argument('--javascript', action='store_true', 
                              help='Enable JavaScript execution')
+    resume_parser.add_argument('--disable-ssl-verify', action='store_true',
+                             help='Disable SSL certificate verification (use only for trusted sites with cert issues)')
     
     # Status command
     status_parser = subparsers.add_parser('status', help='Show crawl status')
@@ -44,8 +48,29 @@ def main():
     view_parser.add_argument('--full', action='store_true', help='Show full content instead of preview')
     
     # Add reset command
-    reset_parser = subparsers.add_parser('reset', help='Reset the database (delete all data)')
+    reset_parser = subparsers.add_parser('reset', help='Reset the databases (delete all data)')
     reset_parser.add_argument('--confirm', action='store_true', help='Confirm the reset')
+    reset_parser.add_argument('--knowledge-only', action='store_true', help='Reset only knowledge database')
+    reset_parser.add_argument('--app-only', action='store_true', help='Reset only application database')
+    
+    # Add embeddings command
+    embeddings_parser = subparsers.add_parser('generate-embeddings', help='Generate embeddings for documents')
+    embeddings_parser.add_argument('--security-level', choices=['external', 'internal', 'sensitive'],
+                                  help='Generate embeddings for specific security level')
+    embeddings_parser.add_argument('--batch-size', type=int, default=10, help='Batch size for processing')
+    embeddings_parser.add_argument('--model', default='all-MiniLM-L6-v2', help='Model name for embeddings')
+    
+    # Add embedding stats command
+    stats_parser = subparsers.add_parser('embedding-stats', help='Show embedding statistics')
+    
+    # Add RAG query command
+    query_parser = subparsers.add_parser('rag-query', help='Query the RAG agent')
+    query_parser.add_argument('query', nargs='*', help='Query text')
+    query_parser.add_argument('--security-level', choices=['external', 'internal', 'sensitive'],
+                             help='Security level for the query')
+    query_parser.add_argument('--top-k', type=int, default=5, help='Number of sources to retrieve')
+    query_parser.add_argument('--min-similarity', type=float, default=0.3, help='Minimum similarity threshold')
+    query_parser.add_argument('--interactive', action='store_true', help='Start interactive mode')
     
     args = parser.parse_args()
     
@@ -53,7 +78,7 @@ def main():
         parser.print_help()
         return
     
-    db = CrawlerDatabase()
+    db = CrawlerDatabase()  # Will use knowledge database by default
     crawler = None
     
     try:
@@ -64,9 +89,14 @@ def main():
             else:
                 print("JavaScript execution disabled (using requests)")
             
+            # Handle SSL verification if requested
+            if getattr(args, 'disable_ssl_verify', False):
+                print("⚠️  SSL certificate verification DISABLED (use only for trusted sites)")
+            
             crawler = WebCrawler(
                 delay=args.delay,
-                use_javascript=args.javascript
+                use_javascript=args.javascript,
+                disable_ssl_verify=getattr(args, 'disable_ssl_verify', False)
             )
             
             # Enable debug mode if requested
@@ -93,8 +123,13 @@ def main():
             if getattr(args, 'javascript', False):
                 print("JavaScript execution enabled")
             
+            # Handle SSL verification if requested
+            if getattr(args, 'disable_ssl_verify', False):
+                print("⚠️  SSL certificate verification DISABLED (use only for trusted sites)")
+            
             crawler = WebCrawler(
-                use_javascript=getattr(args, 'javascript', False)
+                use_javascript=getattr(args, 'javascript', False),
+                disable_ssl_verify=getattr(args, 'disable_ssl_verify', False)
             )
             
             success = crawler.crawl_source(args.source_id, max_pages=args.max_pages)
@@ -193,15 +228,134 @@ def main():
         
         elif args.command == 'reset':
             if not args.confirm:
-                print("This will delete all crawled data. Use --confirm to proceed.")
+                print("This will delete all data. Use --confirm to proceed.")
                 return
             
             import os
-            if os.path.exists(db.db_path):
-                os.remove(db.db_path)
-                print("Database reset successfully")
+            
+            # Determine which databases to reset
+            reset_knowledge = not args.app_only
+            reset_app = not args.knowledge_only
+            
+            if reset_knowledge:
+                knowledge_db_path = get_knowledge_db_path()
+                if os.path.exists(knowledge_db_path):
+                    os.remove(knowledge_db_path)
+                    print(f"✅ Knowledge database reset: {knowledge_db_path}")
+                else:
+                    print(f"⚠️  Knowledge database not found: {knowledge_db_path}")
+            
+            if reset_app:
+                app_db_path = get_app_db_path()
+                if os.path.exists(app_db_path):
+                    os.remove(app_db_path)
+                    print(f"✅ Application database reset: {app_db_path}")
+                else:
+                    print(f"⚠️  Application database not found: {app_db_path}")
+            
+            print("Database(s) reset successfully. You can now start fresh crawling and embeddings.")
+        
+        elif args.command == 'generate-embeddings':
+            print("Generating embeddings for documents...")
+            from embeddings import EmbeddingGenerator
+            
+            # Use knowledge database path
+            generator = EmbeddingGenerator(knowledge_db_path=get_knowledge_db_path(), model_name=args.model)
+            generator.generate_embeddings_batch(
+                security_level=args.security_level,
+                batch_size=args.batch_size
+            )
+        
+        elif args.command == 'embedding-stats':
+            print("Embedding Statistics:")
+            from embeddings import EmbeddingGenerator
+            
+            # Use knowledge database path
+            generator = EmbeddingGenerator(knowledge_db_path=get_knowledge_db_path())
+            stats = generator.get_embedding_stats()
+            
+            print(f"  Status counts: {stats['status_counts']}")
+            print(f"  Total embeddings: {stats['total_embeddings']}")
+            print(f"  Model counts: {stats['model_counts']}")
+        
+        elif args.command == 'rag-query':
+            # Use separated database paths
+            agent = RAGAgent(
+                knowledge_db_path=get_knowledge_db_path(),
+                app_db_path=get_app_db_path()
+            )
+            
+            if args.interactive:
+                print("JEA RAG Agent - Interactive Mode")
+                print("Type 'quit' to exit\n")
+                
+                while True:
+                    import click
+                    query_text = click.prompt("Query", default="", show_default=False)
+                    if query_text.lower() in ['quit', 'exit', 'q']:
+                        break
+                    
+                    if not query_text:
+                        continue
+                    
+                    user_context = {}
+                    if args.security_level:
+                        user_context['user_type'] = 'employee' if args.security_level == 'internal' else 'external'
+                    
+                    # Get complete response from generator
+                    full_response = ""
+                    for chunk in agent.query_response(
+                        query_text,
+                        user_context=user_context,
+                        top_k=args.top_k,
+                        min_similarity=args.min_similarity
+                    ):
+                        full_response += chunk
+                    
+                    # Create a response object for compatibility
+                    from rag_agent import RAGResponse
+                    response = RAGResponse(
+                        answer=full_response,
+                        sources=agent.get_last_sources(),
+                        reasoning="Generated via CLI",
+                        confidence=agent.get_last_confidence(),
+                        security_level="external"
+                    )
+                    
+                    print("\n" + format_response(response))
+                    print("\n" + "="*80 + "\n")
+            
+            elif args.query:
+                query_text = " ".join(args.query)
+                
+                user_context = {}
+                if args.security_level:
+                    user_context['user_type'] = 'employee' if args.security_level == 'internal' else 'external'
+                
+                # Get complete response from generator
+                full_response = ""
+                for chunk in agent.query_response(
+                    query_text,
+                    user_context=user_context,
+                    top_k=args.top_k,
+                    min_similarity=args.min_similarity
+                ):
+                    full_response += chunk
+                
+                # Create a response object for compatibility
+                from rag_agent import RAGResponse
+                response = RAGResponse(
+                    answer=full_response,
+                    sources=agent.get_last_sources(),
+                    reasoning="Generated via CLI",
+                    confidence=agent.get_last_confidence(),
+                    security_level="external"
+                )
+                
+                print(format_response(response))
+            
             else:
-                print("Database file not found")
+                print("Please provide a query or use --interactive mode")
     
     finally:
         # Always clean up crawler resources
@@ -212,12 +366,13 @@ def main():
 @click.option('--security-level', type=click.Choice(['external', 'internal', 'sensitive']),
               help='Generate embeddings for specific security level')
 @click.option('--batch-size', default=10, help='Batch size for processing')
-@click.option('--model', default='modernbert-base', help='Model name for embeddings')
+@click.option('--model', default='all-MiniLM-L6-v2', help='Model name for embeddings')
 def generate_embeddings(security_level, batch_size, model):
     """Generate embeddings for documents"""
     from embeddings import EmbeddingGenerator
     
-    generator = EmbeddingGenerator(model_name=model)
+    # Use knowledge database path
+    generator = EmbeddingGenerator(knowledge_db_path=get_knowledge_db_path(), model_name=model)
     generator.generate_embeddings_batch(security_level=security_level, batch_size=batch_size)
 
 @click.command()
@@ -225,7 +380,8 @@ def embedding_stats():
     """Show embedding statistics"""
     from embeddings import EmbeddingGenerator
     
-    generator = EmbeddingGenerator()
+    # Use knowledge database path
+    generator = EmbeddingGenerator(knowledge_db_path=get_knowledge_db_path())
     stats = generator.get_embedding_stats()
     
     click.echo("Embedding Statistics:")
@@ -242,7 +398,11 @@ def embedding_stats():
 @click.option('--interactive', is_flag=True, help='Start interactive mode')
 def rag_query(query, security_level, top_k, min_similarity, interactive):
     """Query the RAG agent"""
-    agent = RAGAgent()
+    # Use separated database paths
+    agent = RAGAgent(
+        knowledge_db_path=get_knowledge_db_path(),
+        app_db_path=get_app_db_path()
+    )
     
     if interactive:
         click.echo("JEA RAG Agent - Interactive Mode")
@@ -260,11 +420,24 @@ def rag_query(query, security_level, top_k, min_similarity, interactive):
             if security_level:
                 user_context['user_type'] = 'employee' if security_level == 'internal' else 'external'
             
-            response = agent.query(
+            # Get complete response from generator
+            full_response = ""
+            for chunk in agent.query_response(
                 query_text,
                 user_context=user_context,
                 top_k=top_k,
                 min_similarity=min_similarity
+            ):
+                full_response += chunk
+            
+            # Create a response object for compatibility
+            from rag_agent import RAGResponse
+            response = RAGResponse(
+                answer=full_response,
+                sources=agent.get_last_sources(),
+                reasoning="Generated via CLI",
+                confidence=agent.get_last_confidence(),
+                security_level="external"
             )
             
             click.echo("\n" + format_response(response))
@@ -277,11 +450,24 @@ def rag_query(query, security_level, top_k, min_similarity, interactive):
         if security_level:
             user_context['user_type'] = 'employee' if security_level == 'internal' else 'external'
         
-        response = agent.query(
+        # Get complete response from generator
+        full_response = ""
+        for chunk in agent.query_response(
             query_text,
             user_context=user_context,
             top_k=top_k,
             min_similarity=min_similarity
+        ):
+            full_response += chunk
+        
+        # Create a response object for compatibility
+        from rag_agent import RAGResponse
+        response = RAGResponse(
+            answer=full_response,
+            sources=agent.get_last_sources(),
+            reasoning="Generated via CLI",
+            confidence=agent.get_last_confidence(),
+            security_level="external"
         )
         
         click.echo(format_response(response))
@@ -290,7 +476,4 @@ def rag_query(query, security_level, top_k, min_similarity, interactive):
         click.echo("Please provide a query or use --interactive mode")
 
 if __name__ == '__main__':
-    main()
-    click.Group(name="embedding")(generate_embeddings)
-    click.Group(name="embedding")(embedding_stats)
-    click.Group(name="rag")(rag_query) 
+    main() 

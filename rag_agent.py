@@ -18,6 +18,8 @@ import hashlib
 import threading
 import time
 
+
+
 # Add OpenAI import
 try:
     import openai
@@ -84,13 +86,8 @@ class SecurityLevelRouter:
         # Setup Gemini Flash 2.0
         gemini_api_key = os.getenv('GEMINI_API_KEY')
         if gemini_api_key:
-            try:
-                genai.configure(api_key=gemini_api_key)
-                self.gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
-                print("✅ Gemini Flash 2.0 model configured successfully")
-            except Exception as e:
-                print(f"⚠️  Failed to configure Gemini model: {e}")
-                self.gemini_model = None
+            self.gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            genai.configure(api_key=gemini_api_key)
         else:
             print("⚠️  GEMINI_API_KEY not found. Gemini queries will not work.")
             self.gemini_model = None
@@ -99,9 +96,13 @@ class SecurityLevelRouter:
         openai_api_key = os.getenv('OPENAI_API_KEY')
         if openai_api_key and OPENAI_AVAILABLE:
             try:
-                self.openai_client = openai.OpenAI(api_key=openai_api_key)
-                # Test the connection with a simple call
+                import httpx
+                
+                # Use standard SSL verification
+                http_client = httpx.Client(verify=True)
+                self.openai_client = openai.OpenAI(api_key=openai_api_key, http_client=http_client)
                 print("✅ OpenAI GPT-4o-mini model configured successfully")
+
             except Exception as e:
                 print(f"⚠️  Failed to configure OpenAI model: {e}")
                 self.openai_client = None
@@ -242,15 +243,15 @@ class SecurityLevelRouter:
 class QueryCache:
     """Manages caching of queries and responses"""
     
-    def __init__(self, db_path: str, similarity_threshold: float = 0.85):
-        self.db_path = db_path
+    def __init__(self, app_db_path: str, similarity_threshold: float = 0.85):
+        self.app_db_path = app_db_path
         self.similarity_threshold = similarity_threshold
         self.logger = logging.getLogger(__name__)
         self.setup_cache_tables()
     
     def setup_cache_tables(self):
         """Create cache tables if they don't exist"""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.app_db_path)
         cursor = conn.cursor()
         
         # Create query cache table
@@ -316,7 +317,7 @@ class QueryCache:
         """Find a similar cached query using embeddings"""
         # Always create a new connection in the current thread to avoid threading issues
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.app_db_path)
             cursor = conn.cursor()
             
             # Use a simple timeout approach for the database query
@@ -396,7 +397,7 @@ class QueryCache:
                            response: RAGResponse, security_level: str):
         """Cache a query and its response"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.app_db_path)
             cursor = conn.cursor()
             
             query_hash = self._generate_query_hash(query, security_level)
@@ -428,7 +429,7 @@ class QueryCache:
     
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get cache statistics"""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.app_db_path)
         cursor = conn.cursor()
         
         try:
@@ -467,7 +468,7 @@ class QueryCache:
     
     def clear_old_cache_entries(self, days_old: int = 30):
         """Clear cache entries older than specified days"""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.app_db_path)
         cursor = conn.cursor()
         
         try:
@@ -488,10 +489,6 @@ class QueryCache:
         finally:
             conn.close()
 
-class NetworkError(Exception):
-    """Custom exception for network-related errors"""
-    pass
-
 def get_db_path():
     """Get database path with environment variable support"""
     db_path = os.getenv('CRAWLER_DB_PATH')
@@ -500,8 +497,24 @@ def get_db_path():
     else:
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "crawler.db")
 
+def get_knowledge_db_path():
+    """Get knowledge base database path"""
+    db_path = os.getenv('KNOWLEDGE_DB_PATH')
+    if db_path:
+        return os.path.abspath(db_path)
+    else:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge.db")
+
+def get_app_db_path():
+    """Get application database path"""
+    db_path = os.getenv('APP_DB_PATH')
+    if db_path:
+        return os.path.abspath(db_path)
+    else:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.db")
+
 class RAGAgent:
-    def __init__(self, db_path: str = None, 
+    def __init__(self, knowledge_db_path: str = None, app_db_path: str = None,
                  embedding_model: str = "all-MiniLM-L6-v2",
                  cache_similarity_threshold: float = 0.85,
                  preferred_model: str = "gemini"):
@@ -509,135 +522,63 @@ class RAGAgent:
         Initialize RAG Agent
         
         Args:
-            db_path: Path to the SQLite database (if None, uses get_db_path())
+            knowledge_db_path: Path to the knowledge base SQLite database (documents, embeddings)
+            app_db_path: Path to the application SQLite database (interactions, feedback, cache)
             embedding_model: Name of the sentence transformer model
             cache_similarity_threshold: Threshold for cache hit similarity
             preferred_model: "gemini" for Gemini Flash 2.0, "openai" for GPT-4o-mini
         """
-        self.db_path = db_path if db_path else get_db_path()
+        # Set up database paths
+        self.knowledge_db_path = knowledge_db_path if knowledge_db_path else get_knowledge_db_path()
+        self.app_db_path = app_db_path if app_db_path else get_app_db_path()
+        
+        # Keep old db_path for backward compatibility (use app_db_path)
+        self.db_path = self.app_db_path
+        
         self.embedding_model_name = embedding_model
         self.embedding_model = None
         self.preferred_model = preferred_model
         self.security_router = SecurityLevelRouter(preferred_model=preferred_model)
         self.setup_logging()
         
-        # Initialize query cache (always enabled)
-        self.query_cache = QueryCache(self.db_path, cache_similarity_threshold)
+        # Initialize query cache with app database
+        self.query_cache = QueryCache(self.app_db_path, cache_similarity_threshold)
         
-        # Set up local model cache directory
-        self.model_cache_dir = r"\\jeasas2p1\Utility Analytics\Load Research\Projects\jeacomsearch\models\sentence-transformers"
+        # Simple model cache directory
+        self.model_cache_dir = r"C:\python\jeasearch\models\sentence-transformers"
         
-        # Initialize embedding model with local caching
+        # Initialize embedding model
         try:
             self.embedding_model = self._load_embedding_model()
             self.logger.info("✅ Embedding model loaded successfully")
         except Exception as e:
             self.logger.error(f"Failed to initialize embedding model: {e}")
         
-        # Log model configuration
+        # Log model configuration and database paths
         model_info = self.security_router.get_model_info()
         self.logger.info(f"🤖 Model configuration: {model_info}")
+        self.logger.info(f"📚 Knowledge DB: {self.knowledge_db_path}")
+        self.logger.info(f"💾 Application DB: {self.app_db_path}")
     
     def setup_logging(self):
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
     
     def _load_embedding_model(self):
-        """Load embedding model with local caching and UNC path support"""
+        """Load embedding model from models folder"""
         model_name = "all-MiniLM-L6-v2"
-        local_model_path = os.path.join(self.model_cache_dir, model_name)
+        model_path = os.path.join(self.model_cache_dir, model_name)
+        
+        self.logger.info(f"Loading embedding model from: {model_path}")
         
         try:
-            # Try to load from local cache first
-            if os.path.exists(local_model_path) and os.listdir(local_model_path):
-                self.logger.info(f"Loading embedding model from cache: {local_model_path}")
-                
-                # Check if required files exist
-                required_files = ['config.json', 'sentence_bert_config.json', 'modules.json']
-                missing_files = []
-                for file in required_files:
-                    if not os.path.exists(os.path.join(local_model_path, file)):
-                        missing_files.append(file)
-                
-                if missing_files:
-                    self.logger.warning(f"Missing required files: {missing_files}")
-                    raise FileNotFoundError(f"Missing model files: {missing_files}")
-                
-                # Method 1: Convert UNC path to a format that works with SentenceTransformer
-                try:
-                    # For UNC paths, we need to copy to a local temp directory or use a different approach
-                    import tempfile
-                    import shutil
-                    
-                    # Create a temporary local copy if on UNC path
-                    if local_model_path.startswith('\\\\'):
-                        self.logger.info("Detected UNC path, creating local copy...")
-                        
-                        # Create temp directory
-                        temp_dir = tempfile.mkdtemp()
-                        temp_model_path = os.path.join(temp_dir, model_name)
-                        
-                        # Copy model files to temp directory
-                        shutil.copytree(local_model_path, temp_model_path)
-                        
-                        # Load from temp directory
-                        model = SentenceTransformer(temp_model_path, device='cpu')
-                        self.logger.info("✅ Successfully loaded model from temporary local copy")
-                        
-                        # Clean up temp directory
-                        try:
-                            shutil.rmtree(temp_dir)
-                        except:
-                            pass  # Don't fail if cleanup fails
-                        
-                        return model
-                    else:
-                        # Regular local path
-                        model = SentenceTransformer(local_model_path, device='cpu')
-                        self.logger.info("✅ Successfully loaded model from local path")
-                        return model
-                        
-                except Exception as e:
-                    self.logger.warning(f"Method 1 (direct loading) failed: {e}")
-            
-            # If not cached, try to download
-            self.logger.info(f"Model not found locally. Attempting to download: {model_name}")
-            
-            # Disable SSL verification temporarily (only for model download)
-            original_ssl_context = ssl._create_default_https_context
-            ssl._create_default_https_context = ssl._create_unverified_context
-            
-            # Disable urllib3 warnings
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            
-            try:
-                # Download and cache the model
-                model = SentenceTransformer(model_name, cache_folder=os.path.dirname(self.model_cache_dir), device='cpu')
-                
-                # Save to specific local path for future use
-                model.save(local_model_path)
-                self.logger.info(f"Model downloaded and cached to: {local_model_path}")
-                
-                return model
-                
-            finally:
-                # Restore original SSL context
-                ssl._create_default_https_context = original_ssl_context
-            
+            model = SentenceTransformer(model_path, device='cpu')
+            self.logger.info("✅ Successfully loaded model")
+            return model
         except Exception as e:
-            self.logger.error(f"Failed to load embedding model: {e}")
-            raise Exception(f"Cannot load embedding model. Please ensure all required files are in: {local_model_path}")
+            self.logger.error(f"Failed to load model from {model_path}: {e}")
+            raise Exception(f"Cannot load embedding model from: {model_path}")
 
-    def _check_huggingface_cache(self, model_name):
-        """Check if model exists in HuggingFace cache"""
-        try:
-            from transformers import AutoTokenizer
-            # This will succeed if the model is in HF cache
-            AutoTokenizer.from_pretrained(model_name, local_files_only=True)
-            return True
-        except:
-            return False
-    
     def determine_security_level(self, query: str, user_context: Dict[str, Any] = None) -> str:
         """Determine appropriate security level based on query and user context"""
         # For now, simple implementation - can be enhanced with more sophisticated routing
@@ -680,14 +621,14 @@ class RAGAgent:
             query_embedding = self.encode_query(query)
             self.logger.info(f"🔢 Generated new embedding for query (shape: {query_embedding.shape})")
             
-            # Connect to database
-            conn = sqlite3.connect(self.db_path)
+            # Connect to knowledge base database
+            conn = sqlite3.connect(self.knowledge_db_path)
             cursor = conn.cursor()
             
             # Check what tables exist
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = [row[0] for row in cursor.fetchall()]
-            self.logger.info(f"📊 Available tables in database: {tables}")
+            self.logger.info(f"📊 Available tables in knowledge database: {tables}")
             
             # First, let's check what columns actually exist in documents table
             cursor.execute("PRAGMA table_info(documents)")
@@ -785,540 +726,156 @@ class RAGAgent:
         except Exception as e:
             self.logger.error(f"Error in retrieve_documents: {e}")
             return []
-    
-    def analyze_query_intent(self, query: str) -> Dict[str, Any]:
-        """Analyze query to determine intent and information needs"""
-        query_lower = query.lower()
-        
-        # Simple intent classification - can be enhanced
-        intents = {
-            'factual': ['what', 'who', 'when', 'where', 'how much', 'how many'],
-            'procedural': ['how to', 'how do', 'process', 'procedure', 'steps'],
-            'policy': ['policy', 'rule', 'regulation', 'requirement', 'allowed', 'permitted'],
-            'contact': ['contact', 'phone', 'email', 'address', 'reach'],
-            'comparison': ['compare', 'difference', 'versus', 'vs', 'better'],
-        }
-        
-        detected_intents = []
-        for intent, keywords in intents.items():
-            if any(keyword in query_lower for keyword in keywords):
-                detected_intents.append(intent)
-        
-        if not detected_intents:
-            detected_intents = ['general']
-        
-        return {
-            'primary_intent': detected_intents[0],
-            'all_intents': detected_intents,
-            'requires_specific_sources': any(word in query_lower for word in ['policy', 'regulation', 'procedure', 'contact']),
-            'is_comparative': 'comparison' in detected_intents
-        }
-    
-    def analyze_query_ambiguity_with_llm(self, query: str, retrieved_docs: List[RetrievedDocument], security_level: str) -> Dict[str, Any]:
-        """Use LLM to analyze if query is ambiguous and needs clarification with network error handling"""
-        
-        model = self.security_router.get_model(security_level)
-        
-        if model is None:
-            # Fallback to simple analysis if no LLM available
-            return {
-                'is_ambiguous': False,
-                'needs_clarification': False,
-                'clarifying_questions': [],
-                'confidence_reduction': 0.0,
-                'reasoning': "No LLM available for ambiguity analysis"
-            }
-        
-        # Prepare context from retrieved documents
-        context_preview = ""
-        if retrieved_docs:
-            context_preview = "\n".join([
-                f"- {doc.title}: {doc.chunk_text[:200]}..." 
-                for doc in retrieved_docs[:3]
-            ])
-        
-        ambiguity_analysis_prompt = f"""You are an expert at analyzing user queries for ambiguity and determining when clarification is needed.
 
-Analyze this user query and determine if it's ambiguous or needs clarification to provide an accurate answer.
-
-USER QUERY: "{query}"
-
-AVAILABLE CONTEXT (top 3 most relevant documents):
-{context_preview if context_preview else "No relevant documents found"}
-
-IMPORTANT ASSUMPTIONS TO MAKE:
-- For rates/pricing: Assume CURRENT rates unless historical rates are explicitly requested
-- For schedules/hours: Assume CURRENT schedule unless otherwise specified
-- For policies/procedures: Assume CURRENT/ACTIVE policies unless historical versions are requested
-- For time-sensitive information: Assume TODAY/NOW unless a specific time is mentioned
-- For contact information: Assume CURRENT contact details
-
-DEFAULT ASSUMPTIONS FOR UTILITY QUERIES:
-- "electric rates" → Assume RESIDENTIAL electric rates (most common request)
-- "water rates" → Assume RESIDENTIAL water rates
-- "fuel rates" → Assume JEA's electricity generation fuel rates (what customers pay)
-- "break down rates" → Provide standard residential rate components
-- "hours" → Assume CUSTOMER SERVICE hours (most common)
-- "contact" → Assume CUSTOMER SERVICE contact info
-- "apply for service" → Assume RESIDENTIAL service connection
-- "pay bill" → Assume standard online/phone payment methods
-
-GUIDANCE:
-- Utility customers usually want the most common/standard information
-- Only request clarification if the query would lead to SIGNIFICANTLY different answers
-- If you can provide a helpful answer with reasonable defaults, do NOT request clarification
-- For rate queries, provide the standard residential information and briefly mention alternatives exist
-- Err strongly on the side of being helpful rather than asking for clarification
-- Most customers are residential, so default to residential information
-
-Your task:
-1. Determine if the query is ambiguous AFTER applying all assumptions above
-2. Consider if the available context provides enough information to give a useful answer
-3. Only suggest clarification if absolutely necessary for accuracy
-
-Respond in this JSON format:
-{{
-    "is_ambiguous": true/false,
-    "needs_clarification": true/false,
-    "confidence_in_current_context": 0.0-1.0,
-    "clarifying_questions": ["question 1", "question 2"],
-    "reasoning": "Brief explanation of your analysis",
-    "assumptions_applied": ["assumption 1", "assumption 2"],
-    "default_response_possible": true/false
-}}
-
-Examples of queries that should NOT need clarification (provide default answer):
-- "What are the electric rates?" → Provide residential rates, mention commercial available
-- "Break down the residential electric rate" → Provide rate components (basic charge, energy tiers, fuel)
-- "What are fuel rates?" → Provide current JEA fuel rates for electricity generation
-- "What are JEA's hours?" → Provide customer service hours, mention other departments  
-- "How do I pay my bill?" → Provide standard payment methods
-- "What is JEA's phone number?" → Provide main customer service number
-
-Examples of queries that DO need clarification:
-- "How much will my bill be?" → Need usage/property details
-- "When will my service be restored?" → Need specific outage information
-- "Can I get a discount?" → Need customer type/situation details
-
-Be extremely conservative about requesting clarification for standard utility information."""
-
+    def _check_cache(self, query: str, security_level: str):
+        """Check cache for a similar query."""
         try:
-            if security_level == "external" and model:
-                response = self.security_router.generate_content(ambiguity_analysis_prompt)
-                response_text = response.text.strip()
-                
-                # Try to parse JSON response
-                try:
-                    # Clean up the response to extract JSON
-                    if "```json" in response_text:
-                        json_start = response_text.find("```json") + 7
-                        json_end = response_text.find("```", json_start)
-                        response_text = response_text[json_start:json_end].strip()
-                    elif "{" in response_text and "}" in response_text:
-                        # Extract JSON from response
-                        json_start = response_text.find("{")
-                        json_end = response_text.rfind("}") + 1
-                        response_text = response_text[json_start:json_end]
-                    
-                    analysis = json.loads(response_text)
-                    
-                    # Validate the response structure
-                    required_keys = ['is_ambiguous', 'needs_clarification', 'confidence_in_current_context', 'reasoning']
-                    if all(key in analysis for key in required_keys):
-                        # If default response is possible, reduce need for clarification
-                        if analysis.get('default_response_possible', False):
-                            analysis['needs_clarification'] = False
-                            analysis['confidence_in_current_context'] = max(0.7, analysis['confidence_in_current_context'])
-                        
-                        # Calculate confidence reduction based on ambiguity
-                        confidence_reduction = max(0.0, (1.0 - analysis['confidence_in_current_context']) * 0.2)
-                        
-                        return {
-                            'is_ambiguous': analysis['is_ambiguous'],
-                            'needs_clarification': analysis['needs_clarification'],
-                            'clarifying_questions': analysis.get('clarifying_questions', []),
-                            'confidence_reduction': confidence_reduction,
-                            'reasoning': analysis['reasoning'],
-                            'llm_confidence': analysis['confidence_in_current_context'],
-                            'assumptions_applied': analysis.get('assumptions_applied', []),
-                            'default_response_possible': analysis.get('default_response_possible', False)
-                        }
-                    else:
-                        raise ValueError("Missing required keys in LLM response")
-                    
-                except (json.JSONDecodeError, ValueError) as e:
-                    self.logger.warning(f"Failed to parse LLM ambiguity analysis: {e}")
-                    # Fallback: be more lenient for common queries
-                    query_lower = query.lower()
-                    common_queries = ['rate', 'hour', 'contact', 'phone', 'pay', 'bill']
-                    is_common = any(word in query_lower for word in common_queries)
-                    
-                    return {
-                        'is_ambiguous': False,
-                        'needs_clarification': False,
-                        'clarifying_questions': [],
-                        'confidence_reduction': 0.1 if not is_common else 0.0,
-                        'reasoning': "LLM response parsing failed, used fallback analysis with common query detection",
-                        'assumptions_applied': ["current/today assumed for time-sensitive queries", "residential assumed for rate queries"],
-                        'default_response_possible': is_common
-                    }
+            query_embedding = self.encode_query(query)
+            cached_result = self.query_cache.find_similar_cached_query(
+                query, query_embedding, security_level
+            )
             
-            else:
-                # Fallback for non-external security levels
-                return {
-                    'is_ambiguous': False,
-                    'needs_clarification': False,
-                    'clarifying_questions': [],
-                    'confidence_reduction': 0.0,
-                    'reasoning': f"LLM not available for {security_level} security level",
-                    'assumptions_applied': ["current/today assumed for time-sensitive queries", "residential assumed for rate queries"]
-                }
-            
+            if cached_result:
+                self.logger.info("✅ Returning cached response")
+                self.last_sources = self.query_cache._deserialize_sources(cached_result.response_sources)
+                self.last_confidence = cached_result.confidence
+                self._is_cached_response = True
+                return cached_result.response_answer
         except Exception as e:
             if self._is_network_error(e):
-                self.logger.warning(f"Network error during ambiguity analysis: {e}")
-                return {
-                    'is_ambiguous': False,
-                    'needs_clarification': False,
-                    'confidence_reduction': 0.0,
-                    'reasoning': "Network error prevented ambiguity analysis"
-                }
+                self.logger.warning(f"Network error during cache lookup: {e}")
             else:
-                self.logger.error(f"Error in ambiguity analysis: {e}")
-                return {
-                    'is_ambiguous': False,
-                    'needs_clarification': False,
-                    'confidence_reduction': 0.1,
-                    'reasoning': f"Ambiguity analysis failed: {str(e)}"
-                }
+                self.logger.warning(f"Cache lookup failed: {e}")
+        return None
 
-    def generate_response(self, query: str, retrieved_docs: List[RetrievedDocument], 
-                         query_intent: Dict[str, Any], security_level: str) -> RAGResponse:
-        """Generate response from retrieved documents with network error handling"""
+    def _retrieve_and_process_documents(self, query: str, security_level: str, top_k: int, min_similarity: float):
+        """Retrieve documents and handle cases with no results."""
+        self.logger.info("🔍 Starting document retrieval...")
+        retrieved_docs = self.retrieve_documents(query, security_level, top_k, min_similarity)
         
+        self.logger.info(f"📄 Retrieved {len(retrieved_docs)} documents:")
+        for i, doc in enumerate(retrieved_docs[:3]):
+            self.logger.info(f"  {i+1}. {doc.title} (score: {doc.similarity_score:.3f})")
+        
+        import copy
+        self.last_sources = copy.deepcopy(retrieved_docs)
+        self.logger.info(f"✅ Stored {len(self.last_sources)} sources for display (even if AI fails)")
+
         if not retrieved_docs:
-            return RAGResponse(
-                answer="I couldn't find relevant information in the JEA knowledge base to answer your question. You might want to try rephrasing your question or contact JEA customer service at (904) 665-6000.",
-                sources=[],
-                reasoning="No relevant documents found",
-                confidence=0.0,
-                security_level=security_level
-            )
+            self.last_sources = []
+            self.logger.info("❌ No documents found - sources explicitly set to empty")
+            return None, "I couldn't find relevant information in the JEA knowledge base to answer your question. You might want to try rephrasing your question or contact JEA customer service directly at (904) 665-6000."
+
+        return retrieved_docs, None
+
+    def _generate_response_with_timeout(self, prompt: str, timeout: float = 30.0):
+        """Generate response from LLM with a timeout."""
+        response_container = [None]
+        exception_container = [None]
+
+        def api_thread():
+            try:
+                self.logger.info("🚀 Starting API call...")
+                response = self.security_router.generate_content(prompt, stream=False)
+                self.logger.info("✅ Received complete response from API")
+                response_container[0] = response.text
+            except Exception as e:
+                exception_container[0] = e
+
+        thread = threading.Thread(target=api_thread)
+        thread.daemon = True
+        thread.start()
+        thread.join(timeout=timeout)
+
+        if thread.is_alive():
+            self.logger.error("API call timed out")
+            return None, "\n\n🕐 **Request Timed Out**\n\nThe request is taking longer than expected. This could be due to:\n- Network connectivity issues\n\n💡 **Note:** I've found relevant sources that may contain your answer - check the sources section below!"
         
-        try:
-            # Build context from documents
-            context = self.build_context_from_docs(retrieved_docs)
-            
-            # Get appropriate model
-            model = self.security_router.get_model(security_level)
-            
-            if model is None:
-                return RAGResponse(
-                    answer="I'm sorry, but the AI service is temporarily unavailable.",
+        if exception_container[0]:
+            raise exception_container[0]
+
+        return response_container[0], None
+
+    def _cache_new_response(self, query: str, response_text: str, retrieved_docs: List[RetrievedDocument], security_level: str):
+        """Cache the newly generated response."""
+        if len(response_text.strip()) > 10:
+            try:
+                calculated_confidence = self.calculate_confidence(query, retrieved_docs, response_text)
+                self.last_confidence = calculated_confidence
+                
+                response_obj = RAGResponse(
+                    answer=response_text,
                     sources=retrieved_docs,
-                    reasoning="AI model not available",
-                    confidence=0.0,
+                    reasoning="Generated via API call",
+                    confidence=calculated_confidence,
                     security_level=security_level
                 )
-            
-            # Build the prompt
-            prompt = self.build_rag_prompt(query, context, None)
-            
-            # Generate response with network error handling
-            try:
-                response = self.security_router.generate_content(prompt)
-                response_text = response.text.strip()
                 
+                query_embedding = self.encode_query(query)
+                self.query_cache.cache_query_response(
+                    query, query_embedding, response_obj, security_level
+                )
+                self.logger.info("✅ Cached complete response")
             except Exception as e:
                 if self._is_network_error(e):
-                    raise NetworkError(f"Network error during response generation: {e}")
+                    self.logger.warning(f"Network error while caching: {e}")
                 else:
-                    raise e
-            
-            # Analyze ambiguity with error handling
-            try:
-                ambiguity_analysis = self.analyze_query_ambiguity_with_llm(query, retrieved_docs, security_level)
-            except Exception as e:
-                if self._is_network_error(e):
-                    self.logger.warning(f"Network error during ambiguity analysis: {e}")
-                    ambiguity_analysis = {
-                        'is_ambiguous': False,
-                        'needs_clarification': False,
-                        'confidence_reduction': 0.0,
-                        'reasoning': "Network error prevented ambiguity analysis"
-                    }
-                else:
-                    # Default values if analysis fails
-                    ambiguity_analysis = {
-                        'is_ambiguous': False,
-                        'needs_clarification': False,
-                        'confidence_reduction': 0.0,
-                        'reasoning': "Ambiguity analysis failed"
-                    }
-            
-            # Calculate confidence
-            base_confidence = self.calculate_confidence(query, retrieved_docs, response_text)
-            confidence_reduction = ambiguity_analysis.get('confidence_reduction', 0.0)
-            final_confidence = max(0.1, base_confidence - confidence_reduction)
-            
-            return RAGResponse(
-                answer=response_text,
-                sources=retrieved_docs,
-                reasoning=f"Generated from {len(retrieved_docs)} sources. {ambiguity_analysis.get('reasoning', '')}",
-                confidence=final_confidence,
-                security_level=security_level
-            )
-            
-        except NetworkError as e:
-            # Return network error message
-            return RAGResponse(
-                answer=self._handle_network_error(e, "generating response"),
-                sources=retrieved_docs,
-                reasoning="Network connectivity issue",
-                confidence=0.0,
-                security_level=security_level
-            )
-        except Exception as e:
-            self.logger.error(f"Error generating response: {e}")
-            return RAGResponse(
-                answer="I encountered an error while processing your request.",
-                sources=retrieved_docs,
-                reasoning=f"Error: {str(e)}",
-                confidence=0.0,
-                security_level=security_level
-            )
+                    self.logger.warning(f"Failed to cache response: {e}")
 
-    def _configure_ssl_for_gemini(self):
-        """Configure SSL settings for Gemini API calls"""
+    def query_response(self, query: str, user_context=None, top_k: int = 5, 
+             min_similarity: float = 0.3, high_reasoning: bool = True):
+        """Process query and return complete response (no streaming)"""
         try:
-            # Store original context
-            if not hasattr(self, '_original_ssl_context'):
-                self._original_ssl_context = ssl._create_default_https_context
-            
-            # Create unverified context for Gemini calls
-            ssl._create_default_https_context = ssl._create_unverified_context
-            
-            # Disable urllib3 warnings
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            
-            self.logger.info("🔧 SSL verification disabled for Gemini API")
-            
-        except Exception as e:
-            self.logger.warning(f"Failed to configure SSL: {e}")
-
-    def _restore_ssl_context(self):
-        """Restore original SSL context"""
-        try:
-            if hasattr(self, '_original_ssl_context'):
-                ssl._create_default_https_context = self._original_ssl_context
-                self.logger.info("🔧 SSL context restored")
-        except Exception as e:
-            self.logger.warning(f"Failed to restore SSL context: {e}")
-
-    def stream_query(self, query: str, user_context=None, top_k: int = 5, 
-                    min_similarity: float = 0.3, high_reasoning: bool = True):
-        """Stream tokens from the query response with enhanced error handling"""
-        try:
-            # Configure SSL for API calls
-            self._configure_ssl_for_gemini()
-            
-            # FORCE clear all previous state at the very beginning
-            self.last_sources = []
-            if hasattr(self, '_cached_results'):
-                delattr(self, '_cached_results')
+            self.reset_state()
             
             mode = "high reasoning" if high_reasoning else "standard"
-            self.logger.info(f"🔄 STREAM_QUERY: Starting {mode} query: '{query}' - All state cleared")
+            self.logger.info(f"🔄 QUERY: Starting {mode} query: '{query}' - All state cleared")
             
-            # Extract the actual question from enhanced query with conversation context
             search_query = query
             if "Current question:" in query:
-                parts = query.split("Current question:")
-                if len(parts) > 1:
-                    search_query = parts[-1].strip()
-                    self.logger.info(f"📝 Extracted current question for search: '{search_query}'")
+                search_query = query.split("Current question:")[-1].strip()
+                self.logger.info(f"📝 Extracted current question for search: '{search_query}'")
             
-            # Determine security level
             security_level = self.determine_security_level(search_query, user_context)
             
-            # Step 1: Check cache first (simplified without threading timeout)
-            try:
-                query_embedding = self.encode_query(search_query)
-                cached_result = self.query_cache.find_similar_cached_query(
-                    search_query, query_embedding, security_level
-                )
-                
-                if cached_result:
-                    # Stream cached response
-                    sources = self.query_cache._deserialize_sources(cached_result.response_sources)
-                    self.last_sources = sources.copy()
-                    
-                    # Store cached confidence
-                    self.last_confidence = cached_result.confidence
-                    
-                    self.logger.info(f"✅ Streaming cached response")
-                    
-                    # Stream the cached answer
-                    cached_answer = cached_result.response_answer
-                    words = cached_answer.split()
-                    
-                    for i, word in enumerate(words):
-                        yield f" {word}" if i > 0 else word
-                        
-                        # Small delay for streaming effect
-                        time.sleep(0.05)
-                    
-                    return
-                    
-            except Exception as e:
-                if self._is_network_error(e):
-                    self.logger.warning(f"Network error during cache lookup: {e}")
-                else:
-                    self.logger.warning(f"Cache lookup failed: {e}")
-                # Continue with normal processing
-            
-            # Step 2: Normal processing if no cache hit
-            self.logger.info(f"🔍 Starting document retrieval...")
-            retrieved_docs = self.retrieve_documents(search_query, security_level, top_k, min_similarity)
-            
-            # Log what we actually retrieved
-            self.logger.info(f"📄 Retrieved {len(retrieved_docs)} documents:")
-            for i, doc in enumerate(retrieved_docs[:3]):
-                self.logger.info(f"  {i+1}. {doc.title} (score: {doc.similarity_score:.3f})")
-            
-            # Store sources immediately after retrieval - BEFORE any AI processing
-            import copy
-            self.last_sources = copy.deepcopy(retrieved_docs)
-            self.logger.info(f"✅ Stored {len(self.last_sources)} sources for display (even if AI fails)")
-            
-            if not retrieved_docs:
-                yield "I couldn't find relevant information in the JEA knowledge base to answer your question. "
-                yield "You might want to try rephrasing your question or contact JEA customer service directly at (904) 665-6000."
-                self.last_sources = []
-                self.logger.info("❌ No documents found - sources explicitly set to empty")
+            # Step 1: Check cache
+            cached_response = self._check_cache(search_query, security_level)
+            if cached_response:
+                yield cached_response
                 return
-            
-            # Build context and stream response
+
+            # Step 2: Retrieve documents
+            retrieved_docs, error_message = self._retrieve_and_process_documents(
+                search_query, security_level, top_k, min_similarity
+            )
+            if error_message:
+                yield error_message
+                return
+
+            # Step 3: Generate response
             context = self.build_context_from_docs(retrieved_docs)
-            model = self.security_router.get_model(security_level)
-            
-            if model is None:
-                yield "I apologize, but the AI model is not available at the moment. "
-                return
-            
-            # Build the prompt and stream with timeout (cross-platform)
             prompt = self.build_rag_prompt(query, context, user_context)
             
-            # Collect full response for caching
-            full_response = ""
-            
-            try:
-                # Use threading for timeout on all platforms
-                def api_call_with_timeout():
-                    """Perform API call in a separate thread"""
-                    try:
-                        self.logger.info("🚀 Starting API call...")
-                        response = self.security_router.generate_content(prompt, stream=True)
+            full_response, error_message = self._generate_response_with_timeout(prompt)
+            if error_message:
+                yield error_message
+                return
+
+            if full_response:
+                # Step 4: Cache new response
+                self._cache_new_response(search_query, full_response, retrieved_docs, security_level)
+                yield full_response
+            else:
+                yield "I'm sorry, but I couldn't generate a response at this time."
                         
-                        chunks = []
-                        chunk_count = 0
-                        for chunk in response:
-                            if chunk.text:
-                                chunk_count += 1
-                                chunks.append(chunk.text)
-                        
-                        self.logger.info(f"✅ Received {chunk_count} chunks from API")
-                        return chunks
-                        
-                    except Exception as e:
-                        raise e
-                
-                # Container for results and exceptions
-                chunks_container = [None]
-                exception_container = [None]
-                
-                def api_thread():
-                    try:
-                        chunks_container[0] = api_call_with_timeout()
-                    except Exception as e:
-                        exception_container[0] = e
-                
-                thread = threading.Thread(target=api_thread)
-                thread.daemon = True
-                thread.start()
-                thread.join(timeout=10.0)  # 30 second timeout
-                
-                if thread.is_alive():
-                    self.logger.error("API call timed out")
-                    yield "\n\n🕐 **Request Timed Out**\n\n"
-                    yield "The request is taking longer than expected. This could be due to:\n"
-                    yield "- Network connectivity issues\n\n"
-                    yield "💡 **Note:** I've found relevant sources that may contain your answer - check the sources section below!"
-                    # Don't clear last_sources here - keep them for display
-                    return
-                
-                if exception_container[0]:
-                    raise exception_container[0]
-                
-                if chunks_container[0]:
-                    # Stream the chunks
-                    for chunk_text in chunks_container[0]:
-                        full_response += chunk_text
-                        yield chunk_text
-                
-                # Cache the response after streaming
-                if len(full_response.strip()) > 10:
-                    try:
-                        # Calculate proper confidence based on sources and response quality
-                        calculated_confidence = self.calculate_confidence(search_query, retrieved_docs, full_response)
-                        
-                        # Store the confidence for later retrieval
-                        self.last_confidence = calculated_confidence
-                        
-                        # Create a response object for caching
-                        response_obj = RAGResponse(
-                            answer=full_response,
-                            sources=retrieved_docs,
-                            reasoning="Generated via streaming",
-                            confidence=calculated_confidence,  # Use calculated confidence instead of hardcoded 0.8
-                            security_level=security_level
-                        )
-                        
-                        query_embedding = self.encode_query(search_query)
-                        self.query_cache.cache_query_response(
-                            search_query, query_embedding, response_obj, security_level
-                        )
-                        self.logger.info("✅ Cached streamed response")
-                        
-                    except Exception as e:
-                        if self._is_network_error(e):
-                            self.logger.warning(f"Network error while caching: {e}")
-                        else:
-                            self.logger.warning(f"Failed to cache streamed response: {e}")
-                        
-            except Exception as e:
-                if self._is_network_error(e):
-                    self.logger.error(f"Network error during streaming: {e}")
-                    yield "\n\n"
-                    yield self._handle_network_error(e, "generating response")
-                else:
-                    self.logger.error(f"Error during streaming: {e}")
-                    yield f"\n\nI encountered an error while generating the response: {str(e)}"
-            
         except Exception as e:
             if self._is_network_error(e):
-                self.logger.error(f"Network error in stream_query: {e}")
-                yield self._handle_network_error(e, "processing your query")
+                self.logger.error(f"Network error during response generation: {e}")
+                yield self._handle_network_error(e, "generating response")
             else:
-                self.logger.error(f"Error in stream_query: {e}")
-                yield f"Error processing query: {str(e)}"
-            self.last_sources = []
-        
-        finally:
-            # Always restore SSL context
-            self._restore_ssl_context()
-
+                self.logger.error(f"Error during response generation: {e}")
+                yield f"I encountered an error while generating the response: {str(e)}"
+    
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get query cache statistics"""
         stats = self.query_cache.get_cache_stats()
@@ -1330,8 +887,8 @@ Be extremely conservative about requesting clarification for standard utility in
         if days_old:
             return self.query_cache.clear_old_cache_entries(days_old)
         else:
-            # Clear all cache
-            conn = sqlite3.connect(self.db_path)
+            # Clear all cache from app database
+            conn = sqlite3.connect(self.app_db_path)
             cursor = conn.cursor()
             cursor.execute('DELETE FROM query_cache')
             deleted_count = cursor.rowcount
@@ -1458,6 +1015,7 @@ I apologize for the inconvenience!"""
         """Reset the agent's state"""
         self.last_sources = []
         self.last_confidence = 0.8
+        self._is_cached_response = False
         if hasattr(self, '_cached_results'):
             delattr(self, '_cached_results')
         self.logger.info("🔄 Agent state reset")
@@ -1542,9 +1100,9 @@ if __name__ == "__main__":
             if args.security_level:
                 user_context['user_type'] = 'employee' if args.security_level == 'internal' else 'external'
             
-            # Stream the response for interactive mode
+            # Get the complete response for interactive mode
             print("Response:")
-            for chunk in agent.stream_query(
+            for chunk in agent.query_response(
                 query, 
                 user_context=user_context,
                 top_k=args.top_k,
@@ -1571,9 +1129,9 @@ if __name__ == "__main__":
         if args.security_level:
             user_context['user_type'] = 'employee' if args.security_level == 'internal' else 'external'
         
-        # Stream the response for command-line query
+        # Get the complete response for command-line query
         print("Response:")
-        for chunk in agent.stream_query(
+        for chunk in agent.query_response(
             query,
             user_context=user_context,
             top_k=args.top_k,

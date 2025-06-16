@@ -7,18 +7,43 @@ import hashlib
 from datetime import datetime
 from typing import Set, List, Optional, Dict, Any
 import re
+import os
+import ssl
+import urllib3
+from urllib3.exceptions import InsecureRequestWarning
 from database import CrawlerDatabase
 from playwright.sync_api import sync_playwright, Browser, Page
 
+# Suppress SSL warnings for testing purposes (same as ssl_monitor.py)
+urllib3.disable_warnings(InsecureRequestWarning)
+
+
+
 class WebCrawler:
-    def __init__(self, db_path: str = "crawler.db", delay: float = 1.0, 
-                 user_agent: str = "WebCrawler/1.0", use_javascript: bool = False):
-        self.db = CrawlerDatabase(db_path)
+    def __init__(self, knowledge_db_path: str = None, delay: float = 1.0, 
+                 user_agent: str = "WebCrawler/1.0", use_javascript: bool = False,
+                 disable_ssl_verify: bool = False):
+        """
+        Initialize WebCrawler with knowledge database path
+        
+        Args:
+            knowledge_db_path: Path to knowledge database. If None, uses get_knowledge_db_path()
+            delay: Delay between requests
+            user_agent: User agent string
+            use_javascript: Whether to use JavaScript execution
+            disable_ssl_verify: Whether to disable SSL certificate verification
+        """
+        self.db = CrawlerDatabase(knowledge_db_path)
         self.delay = delay
         self.user_agent = user_agent
         self.use_javascript = use_javascript
+        self.disable_ssl_verify = disable_ssl_verify
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': user_agent})
+        
+        # Store SSL verification setting (same pattern as ssl_monitor.py)
+        self.verify_ssl = not disable_ssl_verify
+        
         self.robots_cache = {}
         self.running = False
         self.debug = False
@@ -26,6 +51,10 @@ class WebCrawler:
         # Setup Playwright if needed
         if use_javascript:
             self.setup_playwright()
+        
+        print(f"✅ WebCrawler initialized with knowledge database: {self.db.db_path}")
+    
+
     
     def setup_playwright(self):
         """Setup Playwright for JavaScript support"""
@@ -58,6 +87,7 @@ class WebCrawler:
                 viewport={'width': 1920, 'height': 1080},
                 locale='en-US',
                 timezone_id='America/New_York',
+                ignore_https_errors=not self.verify_ssl,
                 # Add some browser features that sites might check for
                 extra_http_headers={
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -340,6 +370,17 @@ class WebCrawler:
         excluded_patterns = [
             '/events/',
             '/event/',
+            '/forms/',
+            '_form',
+            '.pdf',
+            '.doc',
+            '.docx',
+            '.xls',
+            '.xlsx',
+            '.ppt',
+            '.pptx',
+            '.zip',
+            '/bid_results/',
         ]
         
         for link in soup.find_all('a', href=True):
@@ -404,7 +445,44 @@ class WebCrawler:
             # Store current URL for link resolution
             self._current_url = url
             
-            response = self.session.get(url, timeout=30)
+            # Determine verification setting (exact same pattern as ssl_monitor.py)
+            verify_setting = self.verify_ssl
+            
+            response = self.session.get(url, timeout=30, verify=verify_setting)
+            
+            # Check content type to avoid parsing binary files
+            content_type = response.headers.get('content-type', '').lower()
+            
+            # Get response content safely
+            content = ''
+            if response.status_code == 200:
+                try:
+                    # Check if this looks like binary content before trying to decode as text
+                    if any(binary_type in content_type for binary_type in [
+                        'application/pdf', 'application/msword', 'application/zip',
+                        'application/octet-stream', 'image/', 'video/', 'audio/'
+                    ]):
+                        # For binary content, don't try to decode as text
+                        content = '<binary-content-skipped>'
+                    else:
+                        # Try to get text content, with fallback handling
+                        content = response.text
+                        
+                        # Additional check: if we get binary-looking content despite HTML content-type
+                        if content and ('\x00' in content or 
+                                      sum(1 for c in content[:100] if ord(c) < 32 and c not in '\n\r\t') > 10):
+                            if self.debug:
+                                print(f"  -> Content appears binary despite content-type: {content_type}")
+                            content = '<binary-content-detected>'
+                            
+                except (UnicodeDecodeError, UnicodeError) as e:
+                    if self.debug:
+                        print(f"  -> Unicode decode error: {e}")
+                    content = '<unicode-decode-error>'
+                except Exception as e:
+                    if self.debug:
+                        print(f"  -> Content decode error: {e}")
+                    content = '<content-decode-error>'
             
             # Get last modified date if available
             last_modified = None
@@ -419,9 +497,10 @@ class WebCrawler:
             
             return {
                 'status_code': response.status_code,
-                'content': response.text if response.status_code == 200 else '',
+                'content': content,
                 'headers': dict(response.headers),
-                'last_modified': last_modified
+                'last_modified': last_modified,
+                'content_type': content_type
             }
         
         except Exception as e:
@@ -613,13 +692,17 @@ class WebCrawler:
                     f.write(content)
                 print(f"  -> Still has JS disabled message, saved to debug_content_{timestamp}.html")
             
+            # Get content type from response headers
+            content_type = headers.get('content-type', '').lower() if headers else ''
+            
             return {
                 'status_code': status_code,
                 'content': content,
                 'headers': headers,
                 'last_modified': None,
                 'final_url': final_url,
-                'title': title
+                'title': title,
+                'content_type': content_type
             }
             
         except Exception as e:
@@ -715,6 +798,80 @@ class WebCrawler:
         # If text is long enough and not mostly JS messages, consider it meaningful
         return len(text) > 200
     
+    def _is_parseable_content(self, response_data: Dict[str, Any]) -> bool:
+        """Check if response content can be parsed as HTML"""
+        if not response_data or response_data['status_code'] != 200:
+            return False
+        
+        content_type = response_data.get('content_type', '').lower()
+        
+        # Skip binary content types
+        binary_types = [
+            'application/pdf',
+            'application/msword',
+            'application/vnd.openxmlformats-officedocument',
+            'application/zip',
+            'application/x-zip-compressed',
+            'application/octet-stream',
+            'image/',
+            'video/',
+            'audio/',
+            'font/',
+            'application/font'
+        ]
+        
+        for binary_type in binary_types:
+            if binary_type in content_type:
+                if self.debug:
+                    print(f"  -> Skipping binary content type: {content_type}")
+                return False
+        
+        # Only process HTML-like content
+        html_types = ['text/html', 'application/xhtml+xml', 'text/plain']
+        if content_type and not any(html_type in content_type for html_type in html_types):
+            if self.debug:
+                print(f"  -> Skipping non-HTML content type: {content_type}")
+            return False
+        
+        # Check if content looks like binary data
+        content = response_data.get('content', '')
+        if not content:
+            return False
+        
+        # Check for our special markers indicating binary/problematic content
+        special_markers = [
+            '<binary-content-skipped>',
+            '<binary-content-detected>',
+            '<unicode-decode-error>',
+            '<content-decode-error>'
+        ]
+        
+        if content in special_markers:
+            if self.debug:
+                print(f"  -> Content marked as: {content}")
+            return False
+        
+        # Quick check for binary content - if content contains null bytes or high ratio of non-printable chars
+        try:
+            if '\x00' in content:  # Null bytes indicate binary
+                if self.debug:
+                    print("  -> Content contains null bytes (binary data)")
+                return False
+            
+            # Count non-printable characters
+            non_printable = sum(1 for c in content[:1000] if ord(c) < 32 and c not in '\n\r\t')
+            if len(content) > 0 and (non_printable / min(len(content), 1000)) > 0.1:
+                if self.debug:
+                    print(f"  -> Content has high ratio of non-printable characters ({non_printable}/{min(len(content), 1000)})")
+                return False
+                
+        except (UnicodeDecodeError, TypeError):
+            if self.debug:
+                print("  -> Content encoding/decoding error - likely binary")
+            return False
+        
+        return True
+    
     def start_crawl(self, base_url: str) -> int:
         """Start crawling a website"""
         # Add source to database
@@ -764,58 +921,116 @@ class WebCrawler:
                 response_data = self._fetch_url(url)
                 
                 if response_data and response_data['status_code'] == 200:
-                    # Parse HTML
-                    soup = BeautifulSoup(response_data['content'], 'html.parser')
+                    # Check if content is parseable before attempting to parse
+                    if not self._is_parseable_content(response_data):
+                        content_type = response_data.get('content_type', 'unknown')
+                        print(f"  -> Skipping non-HTML content (type: {content_type})")
+                        
+                        # Still save the document with metadata but no text extraction
+                        self.db.upsert_document(
+                            source_id=source_id,
+                            url=response_data.get('final_url', url),
+                            content_hash='',
+                            extracted_text='',
+                            title=None,
+                            http_status_code=response_data['status_code'],
+                            last_modified=response_data['last_modified'],
+                            metadata={
+                                'headers': response_data['headers'],
+                                'skipped_reason': f'Non-HTML content type: {content_type}',
+                                'content_type': content_type
+                            }
+                        )
+                        
+                        self.db.log_event('url_skipped', 
+                                        f'Skipped non-HTML content: {url} (type: {content_type})',
+                                        source_id=source_id)
+                        
+                        # Mark as processed but don't increment page count
+                        self.db.mark_queue_item_completed(queue_id)
+                        time.sleep(self.delay)
+                        continue
                     
-                    # Extract links FIRST (before modifying the soup for content extraction)
-                    base_url = self.db.get_source_base_url(source_id)
-                    links = self._extract_links(soup, base_url, response_data.get('final_url', url))
-                    
-                    # Then extract content (which will modify the soup by converting links to markdown)
-                    title = response_data.get('title') or (soup.title.string.strip() if soup.title else None)
-                    text_content = self._extract_text_content(soup)
-                    content_hash = self._calculate_content_hash(response_data['content'])
-                    
-                    # Check if we got meaningful content
-                    is_meaningful = self._has_meaningful_content(text_content)
-                    if not is_meaningful:
-                        if self.debug:
-                            print(f"  -> Warning: Content appears to be mostly JavaScript disabled messages")
-                            print(f"  -> Text preview: {text_content[:200]}...")
-                    else:
-                        if self.debug:
-                            print(f"  -> Extracted {len(text_content)} characters of meaningful content")
-                    
-                    # Save document
-                    doc_id = self.db.upsert_document(
-                        source_id=source_id,
-                        url=response_data.get('final_url', url),
-                        content_hash=content_hash,
-                        extracted_text=text_content,
-                        title=title,
-                        http_status_code=response_data['status_code'],
-                        last_modified=response_data['last_modified'],
-                        metadata={
-                            'headers': response_data['headers'],
-                            'meaningful_content': is_meaningful,
-                            'content_length': len(text_content)
-                        }
-                    )
-                    
-                    # Add links to queue
-                    links_added = 0
-                    for link in links:
-                        if self.db.add_to_queue(source_id, link):
-                            links_added += 1
-                    
-                    print(f"  -> Added {links_added} new URLs to queue")
-                    
-                    self.db.log_event('url_processed', 
-                                    f'Successfully processed: {url} (found {len(links)} links, meaningful: {is_meaningful})',
-                                    source_id=source_id, document_id=doc_id)
-                    
-                    pages_crawled += 1
-                    print(f"  -> Processed successfully ({pages_crawled} pages so far, meaningful: {is_meaningful})")
+                    try:
+                        # Parse HTML with error handling
+                        soup = BeautifulSoup(response_data['content'], 'html.parser')
+                        
+                        # Extract links FIRST (before modifying the soup for content extraction)
+                        base_url = self.db.get_source_base_url(source_id)
+                        links = self._extract_links(soup, base_url, response_data.get('final_url', url))
+                        
+                        # Then extract content (which will modify the soup by converting links to markdown)
+                        title = response_data.get('title') or (soup.title.string.strip() if soup.title else None)
+                        text_content = self._extract_text_content(soup)
+                        content_hash = self._calculate_content_hash(response_data['content'])
+                        
+                        # Check if we got meaningful content
+                        is_meaningful = self._has_meaningful_content(text_content)
+                        if not is_meaningful:
+                            if self.debug:
+                                print(f"  -> Warning: Content appears to be mostly JavaScript disabled messages")
+                                print(f"  -> Text preview: {text_content[:200]}...")
+                        else:
+                            if self.debug:
+                                print(f"  -> Extracted {len(text_content)} characters of meaningful content")
+                        
+                        # Save document
+                        doc_id = self.db.upsert_document(
+                            source_id=source_id,
+                            url=response_data.get('final_url', url),
+                            content_hash=content_hash,
+                            extracted_text=text_content,
+                            title=title,
+                            http_status_code=response_data['status_code'],
+                            last_modified=response_data['last_modified'],
+                            metadata={
+                                'headers': response_data['headers'],
+                                'meaningful_content': is_meaningful,
+                                'content_length': len(text_content),
+                                'content_type': response_data.get('content_type', '')
+                            }
+                        )
+                        
+                        # Add links to queue
+                        links_added = 0
+                        for link in links:
+                            if self.db.add_to_queue(source_id, link):
+                                links_added += 1
+                        
+                        print(f"  -> Added {links_added} new URLs to queue")
+                        
+                        self.db.log_event('url_processed', 
+                                        f'Successfully processed: {url} (found {len(links)} links, meaningful: {is_meaningful})',
+                                        source_id=source_id, document_id=doc_id)
+                        
+                        pages_crawled += 1
+                        print(f"  -> Processed successfully ({pages_crawled} pages so far, meaningful: {is_meaningful})")
+                        
+                    except Exception as parse_error:
+                        # Handle parsing errors gracefully
+                        content_type = response_data.get('content_type', 'unknown')
+                        print(f"  -> Parse error: {str(parse_error)}")
+                        print(f"  -> Content type: {content_type}")
+                        
+                        # Save error information
+                        self.db.upsert_document(
+                            source_id=source_id,
+                            url=response_data.get('final_url', url),
+                            content_hash='',
+                            extracted_text='',
+                            title=None,
+                            http_status_code=response_data['status_code'],
+                            last_modified=response_data['last_modified'],
+                            metadata={
+                                'headers': response_data['headers'],
+                                'parse_error': str(parse_error),
+                                'content_type': content_type
+                            }
+                        )
+                        
+                        self.db.log_event('parse_error', 
+                                        f'Parse error for {url}: {str(parse_error)}',
+                                        source_id=source_id)
                 
                 else:
                     # Handle error

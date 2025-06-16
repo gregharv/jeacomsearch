@@ -11,8 +11,21 @@ import logging
 import re
 
 class EmbeddingGenerator:
-    def __init__(self, db_path: str = "crawler.db", model_name: str = "modernbert-base"):
-        self.db_path = db_path
+    def __init__(self, knowledge_db_path: str = None, model_name: str = "all-MiniLM-L6-v2"):
+        """
+        Initialize EmbeddingGenerator with knowledge database path
+        
+        Args:
+            knowledge_db_path: Path to knowledge database. If None, uses get_knowledge_db_path()
+            model_name: Name of the embedding model to use
+        """
+        if knowledge_db_path is None:
+            # Import here to avoid circular imports
+            from rag_agent import get_knowledge_db_path
+            self.db_path = get_knowledge_db_path()
+        else:
+            self.db_path = knowledge_db_path
+            
         self.model_name = model_name
         self.model = None
         self.chunk_size = 512  # tokens per chunk
@@ -23,76 +36,65 @@ class EmbeddingGenerator:
     def setup_logging(self):
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
+        print(f"✅ EmbeddingGenerator initialized with knowledge database: {self.db_path}")
         
     def init_database(self):
-        """Initialize embedding-related tables"""
+        """Initialize embedding-related tables - they should already exist in knowledge DB"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Create embeddings table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS embeddings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                document_id INTEGER NOT NULL,
-                chunk_index INTEGER NOT NULL,
-                chunk_text TEXT NOT NULL,
-                embedding BLOB NOT NULL,
-                embedding_model TEXT NOT NULL,
-                created_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-                chunk_hash TEXT NOT NULL,
-                FOREIGN KEY (document_id) REFERENCES documents (id),
-                UNIQUE(document_id, chunk_index, embedding_model)
-            )
-        ''')
-        
-        # Create index for fast similarity search
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_embeddings_document 
-            ON embeddings (document_id)
-        ''')
-        
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_embeddings_model 
-            ON embeddings (embedding_model)
-        ''')
-        
-        # Add embedding status to documents table if not exists (with error handling)
-        try:
+        # Check if tables exist
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='embeddings'")
+        if not cursor.fetchone():
+            print("⚠️  Embeddings table not found, creating it...")
+            # Create embeddings table
             cursor.execute('''
-                ALTER TABLE documents 
-                ADD COLUMN embedding_status TEXT DEFAULT 'pending'
+                CREATE TABLE IF NOT EXISTS embeddings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_id INTEGER NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    chunk_text TEXT NOT NULL,
+                    embedding BLOB NOT NULL,
+                    embedding_model TEXT NOT NULL,
+                    created_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    chunk_hash TEXT NOT NULL,
+                    FOREIGN KEY (document_id) REFERENCES documents (id),
+                    UNIQUE(document_id, chunk_index, embedding_model)
+                )
             ''')
-        except sqlite3.OperationalError:
-            # Column already exists
-            pass
-        
-        try:
+            
+            # Create indexes
             cursor.execute('''
-                ALTER TABLE documents 
-                ADD COLUMN embedding_model TEXT
+                CREATE INDEX IF NOT EXISTS idx_embeddings_document 
+                ON embeddings (document_id)
             ''')
-        except sqlite3.OperationalError:
-            # Column already exists
-            pass
-        
-        try:
+            
             cursor.execute('''
-                ALTER TABLE documents 
-                ADD COLUMN embedding_date DATETIME
+                CREATE INDEX IF NOT EXISTS idx_embeddings_model 
+                ON embeddings (embedding_model)
             ''')
-        except sqlite3.OperationalError:
-            # Column already exists
-            pass
+        
+        # Ensure documents table has embedding columns
+        cursor.execute("PRAGMA table_info(documents)")
+        columns = [row[1] for row in cursor.fetchall()]
+        
+        if 'embedding_status' not in columns:
+            cursor.execute('ALTER TABLE documents ADD COLUMN embedding_status TEXT DEFAULT "pending"')
+        
+        if 'embedding_model' not in columns:
+            cursor.execute('ALTER TABLE documents ADD COLUMN embedding_model TEXT')
+        
+        if 'embedding_date' not in columns:
+            cursor.execute('ALTER TABLE documents ADD COLUMN embedding_date DATETIME')
         
         conn.commit()
         conn.close()
         
     def load_model(self):
-        """Load the ModernBERT model"""
+        """Load the embedding model"""
         if self.model is None:
             self.logger.info(f"Loading model: {self.model_name}")
             try:
-                # Try to load ModernBERT through sentence-transformers
                 self.model = SentenceTransformer(self.model_name)
             except Exception as e:
                 self.logger.warning(f"Could not load {self.model_name}, falling back to all-MiniLM-L6-v2")
@@ -343,7 +345,7 @@ class EmbeddingGenerator:
             
             # Process chunks in batches to save memory
             batch_size = 10  # Process 10 chunks at a time
-            conn = sqlite3.connect('crawler.db')
+            conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
             for i in range(0, len(chunks), batch_size):
