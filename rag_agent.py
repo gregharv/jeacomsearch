@@ -489,14 +489,6 @@ class QueryCache:
         finally:
             conn.close()
 
-def get_db_path():
-    """Get database path with environment variable support"""
-    db_path = os.getenv('CRAWLER_DB_PATH')
-    if db_path:
-        return os.path.abspath(db_path)
-    else:
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "crawler.db")
-
 def get_knowledge_db_path():
     """Get knowledge base database path"""
     db_path = os.getenv('KNOWLEDGE_DB_PATH')

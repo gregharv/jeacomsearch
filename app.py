@@ -53,7 +53,7 @@ def setup_feedback_database():
     conn = sqlite3.connect(app_db_path)
     cursor = conn.cursor()
     
-    # Create table if it doesn't exist
+    # Create user_feedback table if it doesn't exist
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_feedback (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,7 +66,25 @@ def setup_feedback_database():
         )
     ''')
     
-    # Check if message_id column exists and add it if not
+    # Create rag_interactions table if it doesn't exist
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS rag_interactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT,
+            session_id TEXT,
+            query TEXT,
+            response_text TEXT,
+            security_level TEXT DEFAULT 'external',
+            num_sources_retrieved INTEGER DEFAULT 0,
+            confidence_score REAL DEFAULT 0.0,
+            sources_json TEXT,
+            cached_from_query_cache BOOLEAN DEFAULT FALSE,
+            user_context_json TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Check if message_id column exists in user_feedback and add it if not
     cursor.execute("PRAGMA table_info(user_feedback)")
     columns = [column[1] for column in cursor.fetchall()]
     
@@ -82,29 +100,50 @@ def setup_feedback_database():
         print("Adding interaction_id column to user_feedback table...")
         cursor.execute('ALTER TABLE user_feedback ADD COLUMN interaction_id INTEGER')
     
-    # Enhance rag_interactions table with missing fields
-    cursor.execute("PRAGMA table_info(rag_interactions)")
-    rag_columns = [column[1] for column in cursor.fetchall()]
+    # Check if rag_interactions table exists and enhance it with missing fields if needed
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='rag_interactions'")
+    rag_table_exists = cursor.fetchone() is not None
     
-    if 'message_id' not in rag_columns:
-        print("Adding message_id column to rag_interactions table...")
-        cursor.execute('ALTER TABLE rag_interactions ADD COLUMN message_id TEXT')
-    
-    if 'session_id' not in rag_columns:
-        print("Adding session_id column to rag_interactions table...")
-        cursor.execute('ALTER TABLE rag_interactions ADD COLUMN session_id TEXT')
-    
-    if 'response_text' not in rag_columns:
-        print("Adding response_text column to rag_interactions table...")
-        cursor.execute('ALTER TABLE rag_interactions ADD COLUMN response_text TEXT')
-    
-    if 'sources_json' not in rag_columns:
-        print("Adding sources_json column to rag_interactions table...")
-        cursor.execute('ALTER TABLE rag_interactions ADD COLUMN sources_json TEXT')
-    
-    if 'cached_from_query_cache' not in rag_columns:
-        print("Adding cached_from_query_cache column to rag_interactions table...")
-        cursor.execute('ALTER TABLE rag_interactions ADD COLUMN cached_from_query_cache BOOLEAN DEFAULT FALSE')
+    if rag_table_exists:
+        # Enhance rag_interactions table with missing fields
+        cursor.execute("PRAGMA table_info(rag_interactions)")
+        rag_columns = [column[1] for column in cursor.fetchall()]
+        
+        if 'message_id' not in rag_columns:
+            print("Adding message_id column to rag_interactions table...")
+            cursor.execute('ALTER TABLE rag_interactions ADD COLUMN message_id TEXT')
+        
+        if 'session_id' not in rag_columns:
+            print("Adding session_id column to rag_interactions table...")
+            cursor.execute('ALTER TABLE rag_interactions ADD COLUMN session_id TEXT')
+        
+        if 'response_text' not in rag_columns:
+            print("Adding response_text column to rag_interactions table...")
+            cursor.execute('ALTER TABLE rag_interactions ADD COLUMN response_text TEXT')
+        
+        if 'sources_json' not in rag_columns:
+            print("Adding sources_json column to rag_interactions table...")
+            cursor.execute('ALTER TABLE rag_interactions ADD COLUMN sources_json TEXT')
+        
+        if 'cached_from_query_cache' not in rag_columns:
+            print("Adding cached_from_query_cache column to rag_interactions table...")
+            cursor.execute('ALTER TABLE rag_interactions ADD COLUMN cached_from_query_cache BOOLEAN DEFAULT FALSE')
+        
+        if 'security_level' not in rag_columns:
+            print("Adding security_level column to rag_interactions table...")
+            cursor.execute('ALTER TABLE rag_interactions ADD COLUMN security_level TEXT DEFAULT "external"')
+        
+        if 'num_sources_retrieved' not in rag_columns:
+            print("Adding num_sources_retrieved column to rag_interactions table...")
+            cursor.execute('ALTER TABLE rag_interactions ADD COLUMN num_sources_retrieved INTEGER DEFAULT 0')
+        
+        if 'confidence_score' not in rag_columns:
+            print("Adding confidence_score column to rag_interactions table...")
+            cursor.execute('ALTER TABLE rag_interactions ADD COLUMN confidence_score REAL DEFAULT 0.0')
+        
+        if 'user_context_json' not in rag_columns:
+            print("Adding user_context_json column to rag_interactions table...")
+            cursor.execute('ALTER TABLE rag_interactions ADD COLUMN user_context_json TEXT')
     
     conn.commit()
     conn.close()
